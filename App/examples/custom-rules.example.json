@@ -1,0 +1,68 @@
+{
+  "$schema": "../schemas/rule-pack-v1.schema.json",
+  "schema_version": 1,
+  "name": "Example organization storage rules",
+  "version": "1.0",
+  "description": "Metadata-only examples. These rules cannot execute cleanup.",
+  "rules": [
+    {
+      "id": "old-partial-download",
+      "title": "Old partial browser download",
+      "scope": "file",
+      "match": {
+        "extensions": [".crdownload", ".part", ".partial"]
+      },
+      "min_size_bytes": 104857600,
+      "min_age_days": 14,
+      "category": "Partial downloads / temporary files",
+      "disposition": "manual_review",
+      "risk": "low",
+      "confidence": "medium",
+      "why_it_exists": "Browsers and download clients use temporary extensions for incomplete transfers.",
+      "recommendation": "Confirm the transfer is inactive and no resumable download is needed.",
+      "removal_risk": "Resumable progress can be lost.",
+      "related_to": ["downloads", "browser"],
+      "reclaim_fraction": 1.0,
+      "max_matches": 100
+    },
+    {
+      "id": "organization-web-cache",
+      "title": "Rebuildable organization web cache",
+      "scope": "directory",
+      "match": {
+        "segments_any": [".next", ".nuxt", ".turbo"]
+      },
+      "require_ancestor_marker_any": ["package.json", "pnpm-lock.yaml", "package-lock.json", "yarn.lock"],
+      "min_size_bytes": 536870912,
+      "category": "Developer build/cache data",
+      "disposition": "manual_review",
+      "risk": "low",
+      "confidence": "high",
+      "why_it_exists": "Web tooling retains transformed assets and incremental-build state.",
+      "recommendation": "Confirm the owning project is reproducible and inactive; use its supported cache workflow after approval.",
+      "removal_risk": "The next build can be slow and locally generated state can be lost.",
+      "related_to": ["development", "Node.js", "build cache"],
+      "reclaim_fraction": 1.0
+    },
+    {
+      "id": "case-evidence-store",
+      "title": "Forensic case evidence store",
+      "scope": "directory",
+      "match_mode": "all",
+      "match": {
+        "path_contains_any": ["\\Cases\\", "/Cases/"],
+        "segments_any": ["Evidence"]
+      },
+      "min_size_bytes": 1,
+      "category": "Forensic evidence",
+      "disposition": "do_not_touch",
+      "risk": "critical",
+      "confidence": "high",
+      "why_it_exists": "The path naming indicates case/evidence retention rather than disposable cache data.",
+      "recommendation": "Preserve and follow organizational evidence-retention and chain-of-custody procedures.",
+      "removal_risk": "Unique evidence and chain of custody can be destroyed.",
+      "related_to": ["cybersecurity", "forensics", "evidence"],
+      "reclaim_fraction": 0.0
+    }
+  ]
+}

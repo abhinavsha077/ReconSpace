@@ -1,0 +1,33 @@
+{
+  "product": "ReconSpace",
+  "version": "1.0.0",
+  "report_schema_version": 4,
+  "release_date": "2026-10-02",
+  "ui_build": "2026-10-02-v1.0.0-production-runner",
+  "safety_model": "READ_ONLY_RECONNAISSANCE_SAFE_RECYCLE_EXECUTOR",
+  "minimum_python": "3.11",
+  "runtime_dependencies": [],
+  "automated_tests": {
+    "unittest": 140,
+    "pytest": 140,
+    "branch_coverage_percent_build_host": 68
+  },
+  "synthetic_acceptance": {
+    "files": 2520,
+    "directories": 34,
+    "findings": 14,
+    "duplicate_groups": 1,
+    "hardlink_aliases": 1,
+    "csv_tables": 16,
+    "result": "PASS"
+  },
+  "scale_sanity": {
+    "files": 50000,
+    "directories": 201,
+    "errors": 0,
+    "result": "PASS",
+    "note": "Linux build-container synthetic result; not a Windows C: benchmark."
+  },
+  "native_windows_collectors_live_tested_in_build_environment": true,
+  "native_windows_validation_document": "WINDOWS_VALIDATION.md"
+}

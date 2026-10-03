@@ -1,0 +1,85 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://reconspace.local/schemas/report-v4.schema.json",
+  "title": "ReconSpace report schema v4 (portable core)",
+  "description": "A portable structural schema for core fields. Runtime validate-report performs additional semantic checks.",
+  "type": "object",
+  "required": [
+    "schema_version", "version", "profile", "stats", "findings", "top_files",
+    "top_directories", "duplicates", "applications", "collectors"
+  ],
+  "properties": {
+    "schema_version": {"const": 4},
+    "version": {"type": "string"},
+    "profile": {"enum": ["quick", "standard", "deep", "forensics"]},
+    "stats": {"$ref": "#/$defs/stats"},
+    "findings": {"type": "array", "items": {"$ref": "#/$defs/finding"}},
+    "top_files": {"type": "array", "items": {"type": "object"}},
+    "top_directories": {"type": "array", "items": {"type": "object"}},
+    "duplicates": {"type": "array", "items": {"type": "object"}},
+    "applications": {"type": "array", "items": {"type": "object"}},
+    "collectors": {"type": "array", "items": {"$ref": "#/$defs/collector"}},
+    "startup": {"type": "array"},
+    "services": {"type": "array"},
+    "scheduled_tasks": {"type": "array"},
+    "processes": {"type": "array"},
+    "binary_trust": {"type": "array"},
+    "path_security": {"type": "array"},
+    "application_footprints": {"type": "array"},
+    "reclaim_summary": {"type": "object"},
+    "rule_pack_info": {"type": "object"},
+    "audit_health": {"type": "object"},
+    "notes": {"type": "array", "items": {"type": "string"}}
+  },
+  "additionalProperties": true,
+  "$defs": {
+    "stats": {
+      "type": "object",
+      "required": ["root", "started_at", "files_seen", "directories_seen", "bytes_seen"],
+      "properties": {
+        "root": {"type": "string"},
+        "started_at": {"type": "string"},
+        "finished_at": {"type": "string"},
+        "files_seen": {"type": "integer", "minimum": 0},
+        "directories_seen": {"type": "integer", "minimum": 0},
+        "bytes_seen": {"type": "integer", "minimum": 0},
+        "filesystem_total_bytes": {"type": ["integer", "null"], "minimum": 0},
+        "filesystem_used_bytes": {"type": ["integer", "null"], "minimum": 0},
+        "filesystem_free_bytes": {"type": ["integer", "null"], "minimum": 0}
+      },
+      "additionalProperties": true
+    },
+    "finding": {
+      "type": "object",
+      "required": [
+        "title", "path", "size_bytes", "category", "disposition", "risk",
+        "confidence", "estimated_reclaimable_bytes"
+      ],
+      "properties": {
+        "title": {"type": "string"},
+        "path": {"type": "string"},
+        "size_bytes": {"type": "integer", "minimum": 0},
+        "category": {"type": "string"},
+        "disposition": {
+          "enum": ["probably_safe_cleanup", "manual_review", "intentional_tooling", "do_not_touch", "informational"]
+        },
+        "risk": {"enum": ["low", "medium", "high", "critical"]},
+        "confidence": {"enum": ["low", "medium", "high"]},
+        "estimated_reclaimable_bytes": {"type": "integer", "minimum": 0}
+      },
+      "additionalProperties": true
+    },
+    "collector": {
+      "type": "object",
+      "required": ["name", "ok"],
+      "properties": {
+        "name": {"type": "string"},
+        "ok": {"type": "boolean"},
+        "applicable": {"type": "boolean"},
+        "data": {},
+        "error": {"type": "string"}
+      },
+      "additionalProperties": true
+    }
+  }
+}

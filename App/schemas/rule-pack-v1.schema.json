@@ -1,0 +1,67 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://reconspace.local/schemas/rule-pack-v1.schema.json",
+  "title": "ReconSpace metadata-only rule pack v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "name", "rules"],
+  "properties": {
+    "$schema": {"type": "string"},
+    "schema_version": {"const": 1},
+    "name": {"type": "string", "minLength": 1},
+    "version": {"type": "string"},
+    "description": {"type": "string"},
+    "rules": {
+      "type": "array",
+      "maxItems": 500,
+      "items": {"$ref": "#/$defs/rule"}
+    }
+  },
+  "$defs": {
+    "stringArray": {"type": "array", "items": {"type": "string"}},
+    "match": {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": false,
+      "properties": {
+        "segments_any": {"$ref": "#/$defs/stringArray"},
+        "path_contains_any": {"$ref": "#/$defs/stringArray"},
+        "path_suffix_any": {"$ref": "#/$defs/stringArray"},
+        "extensions": {"$ref": "#/$defs/stringArray"},
+        "name_regex": {"type": "string", "maxLength": 512},
+        "path_regex": {"type": "string", "maxLength": 512}
+      }
+    },
+    "rule": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id", "title", "scope", "match", "category", "disposition", "risk",
+        "confidence", "why_it_exists", "recommendation", "removal_risk"
+      ],
+      "properties": {
+        "id": {"type": "string", "pattern": "^[A-Za-z0-9_.-]{1,80}$"},
+        "title": {"type": "string", "minLength": 1},
+        "scope": {"enum": ["file", "directory"]},
+        "match_mode": {"enum": ["any", "all"]},
+        "match": {"$ref": "#/$defs/match"},
+        "min_size_bytes": {"type": "integer", "minimum": 0},
+        "min_age_days": {"type": "number", "minimum": 0},
+        "category": {"type": "string", "minLength": 1},
+        "disposition": {
+          "enum": ["probably_safe_cleanup", "manual_review", "intentional_tooling", "do_not_touch", "informational"]
+        },
+        "risk": {"enum": ["low", "medium", "high", "critical"]},
+        "confidence": {"enum": ["low", "medium", "high"]},
+        "why_it_exists": {"type": "string", "minLength": 1},
+        "recommendation": {"type": "string", "minLength": 1},
+        "removal_risk": {"type": "string", "minLength": 1},
+        "related_to": {"$ref": "#/$defs/stringArray"},
+        "exclude_contains_any": {"$ref": "#/$defs/stringArray"},
+        "require_ancestor_marker_any": {"$ref": "#/$defs/stringArray"},
+        "reclaim_fraction": {"type": "number", "minimum": 0, "maximum": 1},
+        "max_matches": {"type": "integer", "minimum": 1, "maximum": 500}
+      }
+    }
+  }
+}

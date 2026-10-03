@@ -1,0 +1,1 @@
+ReconSpace sample software is provided as-is for evaluation and local use. No warranty is provided. Review source and test in your environment before relying on its recommendations.

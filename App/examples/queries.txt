@@ -1,0 +1,15 @@
+# Findings with more than 1 GiB estimated reclaim and low risk
+reclaim>1GiB risk:low
+
+# Old Downloads-area items
+age>180d path:Downloads
+
+# VM, WSL, Docker, or cybersecurity context
+related:virtualization or related:wsl or related:docker or related:cybersecurity
+
+# Signature/permission review
+signature!=Valid user_writable=true
+owner:Users broad_write=true
+
+# Node/Python/Gradle storage by path regex
+path~"(?i)node_modules|\\.venv|\\.gradle|\\.pytest_cache"

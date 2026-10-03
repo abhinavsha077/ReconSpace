@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "reconspace"
+version = "1.0.0"
+description = "Read-only Windows storage and software reconnaissance"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.scripts]
+reconspace = "reconspace.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["reconspace*"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
