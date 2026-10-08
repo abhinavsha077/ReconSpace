@@ -1,16 +1,25 @@
 from __future__ import annotations
 
 import argparse
+import errno
 import json
 import ntpath
 import os
 import secrets
 import threading
 import webbrowser
+from importlib.resources import files
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
 from . import __version__
+from .ai_advisor import (
+    AIProviderConfig,
+    ai_review_to_json,
+    build_advisor_prompt,
+    query_ai_advisor,
+    render_ai_review_markdown,
+)
 from .duplicates import DuplicateScanCancelled
 from .engine import AuditConfig, PROFILE_DEFAULTS, run_audit
 from .scanner import ScanCancelled
@@ -82,6 +91,41 @@ def _request_path(value: object, label: str) -> str:
     return os.path.abspath(os.path.expandvars(os.path.expanduser(text)))
 
 
+def _sample_preview_report() -> dict[str, object]:
+    return {
+        "version": __version__,
+        "profile": "deep",
+        "root": "C:\\",
+        "summary": {
+            "reclaimable_bytes": 14_850_000_000,
+            "reclaimable_breakdown": {
+                "system_cache": 4_200_000_000,
+                "delivery_optimization": 3_500_000_000,
+                "crash_dumps": 1_850_000_000,
+                "recycle_bin": 2_100_000_000,
+                "developer_artifacts": 3_200_000_000,
+            },
+            "total_files": 412_000,
+            "total_dirs": 48_000,
+        },
+        "findings": [
+            {
+                "id": "sample-hibernation",
+                "category": "system_cache",
+                "severity": "info",
+                "title": "Hibernation File (Dism++ style)",
+                "detail": "hiberfil.sys is 16 GiB. Reduced hibernation could reclaim 8 GiB.",
+                "reclaimable_bytes": 8_589_934_592,
+            }
+        ],
+        "system_inventory": {
+            "os": "Windows 11 Pro 64-bit",
+            "hibernation_pagefile": {"hibernation_enabled": True, "hiberfil_size_bytes": 17179869184},
+            "battery_health": {"has_battery": True, "wear_level_percent": 4.5},
+        },
+    }
+
+
 def _html() -> str:
     profiles = json.dumps({k: v for k, v in PROFILE_DEFAULTS.items()}, separators=(",", ":"))
     return r'''<!doctype html>
@@ -91,619 +135,108 @@ def _html() -> str:
 <meta name="viewport" content="width=device-width,initial-scale=1" />
 <title>ReconSpace — Windows Storage Intelligence</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='18' fill='%23111e35'/%3E%3Ccircle cx='32' cy='32' r='18' fill='none' stroke='%2368dce5' stroke-width='4'/%3E%3Ccircle cx='32' cy='32' r='5' fill='%23dfffff'/%3E%3C/svg%3E" />
-<style>
-:root{
-  color-scheme:dark;
-  --bg:#090d16;
-  --surface:#121826;
-  --surface-card:#162035;
-  --surface-hover:#1c273e;
-  --surface-subtle:#0d1320;
-  --text:#f8fafc;
-  --text-muted:#94a3b8;
-  --text-dim:#64748b;
-  --border:#232f45;
-  --border-focus:#3b82f6;
-  --primary:#3b82f6;
-  --primary-hover:#2563eb;
-  --good:#10b981;
-  --good-bg:rgba(16,185,129,0.12);
-  --warn:#f59e0b;
-  --warn-bg:rgba(245,158,11,0.12);
-  --risk:#ef4444;
-  --risk-bg:rgba(239,68,68,0.12);
-  --info:#06b6d4;
-  --info-bg:rgba(6,182,212,0.12);
-  --purple:#a855f7;
-  --purple-bg:rgba(168,85,247,0.12);
-  --accent:#3b82f6;
-  --radius-sm:8px;
-  --radius-md:12px;
-  --radius-lg:16px;
-}
-*{box-sizing:border-box}
-body{
-  margin:0;
-  background-color:var(--bg);
-  background-image:radial-gradient(circle at 50% 0%,#162238 0%,transparent 45%);
-  font:14px/1.6 system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
-  color:var(--text);
-  min-height:100vh;
-  -webkit-font-smoothing:antialiased;
-}
-button,input,select,textarea{font:inherit}
-.wrap{max-width:1540px;margin:0 auto;padding:28px 32px}
-.hero{display:flex;gap:24px;align-items:center;justify-content:space-between;margin-bottom:22px;flex-wrap:wrap}
-.brand h1{font-size:28px;font-weight:800;letter-spacing:-.03em;margin:0 0 6px;display:flex;align-items:center;gap:12px}
-.brand h1 .logo-icon{width:36px;height:36px;border-radius:10px;background:linear-gradient(135deg,#3b82f6,#06b6d4);display:inline-flex;align-items:center;justify-content:center;font-size:20px;color:#fff;box-shadow:0 4px 14px rgba(59,130,246,.3)}
-.brand h1 .version-badge{font-size:11px;font-weight:700;background:rgba(59,130,246,.15);color:#93c5fd;border:1px solid rgba(59,130,246,.3);padding:3px 9px;border-radius:99px}
-.brand p{color:var(--text-muted);margin:0;max-width:820px;font-size:13.5px;line-height:1.5}
-.badges{display:flex;gap:8px;flex-wrap:wrap}
-.badge{border:1px solid rgba(16,185,129,.35);background:var(--good-bg);color:var(--good);padding:6px 13px;border-radius:999px;font-weight:700;font-size:11.5px;display:inline-flex;align-items:center;gap:6px}
-.badge.dim{border-color:var(--border);background:var(--surface);color:var(--text-muted)}
-.panel{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-lg);padding:24px;box-shadow:0 8px 30px rgba(0,0,0,.25);margin:18px 0}
-.controls{display:grid;grid-template-columns:2fr 1.1fr 1fr auto auto;gap:14px;align-items:end}
-.field label{display:block;color:var(--text-muted);font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.05em;margin:0 0 6px}
-.field input,.field select,.field textarea{width:100%;background:var(--surface-subtle);border:1px solid var(--border);color:var(--text);padding:10px 14px;border-radius:10px;outline:none;transition:border-color .15s,box-shadow .15s}
-.field textarea{min-height:70px;resize:vertical}
-.field input:focus,.field select:focus,.field textarea:focus{border-color:var(--border-focus);box-shadow:0 0 0 3px rgba(59,130,246,.2)}
-.quick-chips{display:flex;gap:6px;margin-top:8px;flex-wrap:wrap}
-.chip{font-size:11px;color:var(--text-muted);background:rgba(255,255,255,.05);border:1px solid var(--border);padding:3px 9px;border-radius:6px;cursor:pointer;user-select:none;transition:all .15s}
-.chip:hover{color:var(--text);background:rgba(59,130,246,.15);border-color:var(--primary)}
-button{background:var(--primary);color:#fff;border:0;border-radius:10px;padding:10px 20px;font-weight:700;cursor:pointer;white-space:nowrap;box-shadow:0 2px 10px rgba(37,99,235,.25);transition:all .15s;display:inline-flex;align-items:center;gap:8px;font-size:13.5px}
-button:hover:not(:disabled){background:var(--primary-hover);transform:translateY(-1px);box-shadow:0 4px 14px rgba(37,99,235,.35)}
-button:disabled{opacity:.4;cursor:not-allowed;transform:none;box-shadow:none}
-button.secondary{background:var(--surface-card);color:var(--text);border:1px solid var(--border);box-shadow:none}
-button.secondary:hover:not(:disabled){background:var(--surface-hover);border-color:#384865}
-button.dangerish{background:rgba(239,68,68,.12);color:#fca5a5;border:1px solid rgba(239,68,68,.3);box-shadow:none}
-button.dangerish:hover:not(:disabled){background:rgba(239,68,68,.22);border-color:var(--risk)}
-.advanced{margin-top:16px;border-top:1px solid var(--border);padding-top:14px}
-.advanced summary{cursor:pointer;color:var(--text-muted);font-size:12.5px;font-weight:600;user-select:none}
-.advanced summary:hover{color:var(--text)}
-
-/* Modern Reassuring Monitor Card */
-.monitor-card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-lg);padding:22px;margin:18px 0;box-shadow:0 8px 30px rgba(0,0,0,.25)}
-.monitor-top{display:flex;justify-content:space-between;align-items:center;gap:14px;flex-wrap:wrap;padding-bottom:16px;border-bottom:1px solid var(--border)}
-.monitor-status{display:flex;align-items:center;gap:12px}
-.status-pill{display:inline-flex;align-items:center;gap:8px;padding:6px 14px;border-radius:999px;font-size:12px;font-weight:750;letter-spacing:.03em}
-.status-pill.idle{background:rgba(148,163,184,.1);color:var(--text-muted);border:1px solid var(--border)}
-.status-pill.running{background:rgba(59,130,246,.15);color:#93c5fd;border:1px solid rgba(59,130,246,.4)}
-.status-pill.done{background:var(--good-bg);color:var(--good);border:1px solid rgba(16,185,129,.4)}
-.status-pill.cancelled{background:var(--warn-bg);color:var(--warn);border:1px solid rgba(245,158,11,.4)}
-.status-pill.failed{background:var(--risk-bg);color:var(--risk);border:1px solid rgba(239,68,68,.4)}
-.pulse-dot{width:8px;height:8px;border-radius:50%;background:currentColor;display:inline-block}
-.status-pill.running .pulse-dot{animation:pulse 1.4s infinite ease-in-out}
-@keyframes pulse{0%,100%{transform:scale(1);opacity:1}50%{transform:scale(1.3);opacity:.4}}
-.monitor-metrics{display:flex;align-items:center;gap:14px;color:var(--text-muted);font-size:12.5px}
-.metric-box{display:flex;align-items:center;gap:6px;background:var(--surface-subtle);border:1px solid var(--border);padding:5px 12px;border-radius:8px}
-.metric-box b{color:var(--text);font-variant-numeric:tabular-nums}
-.pulse-heartbeat{width:7px;height:7px;border-radius:50%;background:var(--good);display:inline-block;opacity:.4;transition:opacity .2s}
-.pulse-heartbeat.beat{opacity:1;transform:scale(1.2)}
-
-/* 7-Stage Pipeline Stepper */
-.stepper-wrap{margin:18px 0 14px}
-.stepper-title{font-size:11px;font-weight:700;color:var(--text-muted);text-transform:uppercase;letter-spacing:.06em;margin-bottom:10px}
-.stepper{display:grid;grid-template-columns:repeat(7,1fr);gap:10px}
-.step-node{background:var(--surface-subtle);border:1px solid var(--border);border-radius:10px;padding:10px 12px;display:flex;flex-direction:column;gap:3px;transition:all .2s}
-.step-node.pending{opacity:.5}
-.step-node.active{border-color:var(--primary);background:rgba(59,130,246,.08);box-shadow:0 0 14px rgba(59,130,246,.15)}
-.step-node.completed{border-color:rgba(16,185,129,.4);background:rgba(16,185,129,.04)}
-.step-header{display:flex;align-items:center;justify-content:space-between;font-size:11px;font-weight:700}
-.step-header .step-idx{color:var(--text-dim)}
-.step-header .step-badge{font-size:10px;font-weight:750;padding:1px 6px;border-radius:4px}
-.step-node.completed .step-badge{background:var(--good-bg);color:var(--good)}
-.step-node.active .step-badge{background:rgba(59,130,246,.2);color:#bfdbfe}
-.step-node.pending .step-badge{background:rgba(255,255,255,.04);color:var(--text-dim)}
-.step-name{font-size:12.5px;font-weight:700;color:var(--text);margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.step-desc{font-size:10.5px;color:var(--text-muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-
-/* Progress bar */
-.progress-container{margin:16px 0 12px}
-.progress-labels{display:flex;justify-content:space-between;align-items:center;font-size:12.5px;margin-bottom:7px}
-.progress-detail{color:var(--text);font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:85%}
-.progress-pct{font-weight:750;color:#38bdf8;font-variant-numeric:tabular-nums}
-.progress{height:7px;background:var(--surface-subtle);border-radius:99px;overflow:hidden;position:relative;border:1px solid rgba(255,255,255,.05)}
-.progress>i{display:block;height:100%;width:0;background:linear-gradient(90deg,#3b82f6,#06b6d4,#10b981);border-radius:99px;transition:width .35s ease}
-.progress.indeterminate>i{width:30%;animation:slide 1.4s infinite ease-in-out}
-@keyframes slide{0%{transform:translateX(-120%)}100%{transform:translateX(350%)}}
-
-.reassurance-note{background:rgba(6,182,212,.08);border:1px solid rgba(6,182,212,.25);border-radius:10px;padding:11px 15px;color:#a5f3fc;font-size:12.5px;display:flex;align-items:center;gap:10px;margin-top:12px}
-
-/* Collapsible Activity Log */
-.activity-card{margin-top:14px;background:var(--surface-subtle);border:1px solid var(--border);border-radius:10px;overflow:hidden}
-.activity-header{display:flex;justify-content:space-between;align-items:center;padding:10px 14px;cursor:pointer;user-select:none;font-size:11px;color:var(--text-muted);font-weight:700;background:rgba(255,255,255,.02);border-bottom:1px solid var(--border)}
-.activity-header:hover{color:var(--text)}
-.activity-feed{height:110px;overflow-y:auto;padding:10px 14px;font:11.5px/1.6 Consolas,monospace;color:#94a3b8}
-.activity-row{display:flex;gap:8px}
-.activity-row .t{color:#38bdf8;flex:none}
-.activity-row .m{color:#cbd5e1;word-break:break-all}
-.activity-row.stage .m{color:#c084fc;font-weight:700}
-.activity-row.success .m{color:#34d399;font-weight:700}
-
-/* Executive Metrics */
-.grid{display:grid;grid-template-columns:repeat(6,1fr);gap:12px}
-.metric{background:var(--surface-subtle);border:1px solid var(--border);border-radius:14px;padding:16px 18px;min-width:0}
-.metric b{display:block;font-size:22px;font-weight:800;letter-spacing:-.02em;margin:5px 0 2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-variant-numeric:tabular-nums}
-.metric span{color:var(--text-muted);font-size:11.5px;display:block}
-.metric.good b{color:var(--good)}
-.metric.warn b{color:var(--warn)}
-.metric.info b{color:var(--primary)}
-
-/* Modern Tab Navigation */
-.tabs{display:flex;gap:7px;flex-wrap:wrap;margin-bottom:18px}
-.tab{background:var(--surface-subtle);border:1px solid var(--border);color:var(--text-muted);padding:9px 14px;border-radius:9px;font-size:12.5px;font-weight:600;display:inline-flex;align-items:center;gap:7px;transition:all .15s}
-.tab:hover{color:var(--text);background:var(--surface-card)}
-.tab.active{color:#fff;background:var(--surface-hover);border-color:var(--primary);box-shadow:0 2px 8px rgba(0,0,0,.25)}
-.tab-count{font-size:10px;font-weight:750;background:rgba(255,255,255,.08);color:var(--text-muted);padding:2px 7px;border-radius:99px}
-.tab.active .tab-count{background:rgba(59,130,246,.25);color:#93c5fd}
-
-.toolbar{display:flex;gap:10px;flex-wrap:wrap;margin:12px 0 18px;align-items:center}
-.toolbar input,.toolbar select{background:var(--surface-subtle);border:1px solid var(--border);color:var(--text);padding:10px 14px;border-radius:9px}
-.toolbar input{min-width:300px}
-.small{color:var(--text-muted);font-size:12px}
-.mono{font-family:Consolas,monospace}
-.path{color:#cbd5e1;font-family:Consolas,monospace;font-size:12px;word-break:break-all}
-.hidden{display:none!important}
-.notice{border-left:3px solid var(--warn);padding:14px 16px;background:#241d0b;color:#fef3c7;border-radius:10px;font-size:13px}
-.error{border-left-color:var(--risk);background:#2d1214;color:#fee2e2}
-.success{border-left-color:var(--good);background:#0d261b;color:#d1fae5}
-
-/* Categorized Findings System */
-.cat-bar{display:flex;gap:8px;flex-wrap:wrap;margin:10px 0 18px}
-.cat-pill{background:var(--surface-subtle);border:1px solid var(--border);color:var(--text-muted);padding:8px 14px;border-radius:999px;cursor:pointer;font-size:12px;font-weight:600;display:inline-flex;align-items:center;gap:7px;transition:all .15s}
-.cat-pill:hover{color:var(--text);border-color:var(--primary);background:var(--surface-card)}
-.cat-pill.active{color:#fff;background:#1e3a8a;border-color:var(--primary);box-shadow:0 2px 8px rgba(59,130,246,.2)}
-.cat-pill .sub{font-size:10.5px;opacity:.85}
-.cat-section{background:var(--surface-subtle);border:1px solid var(--border);border-radius:16px;padding:22px;margin:18px 0 24px}
-.cat-section-header{display:flex;justify-content:space-between;align-items:flex-start;gap:16px;margin-bottom:16px;padding-bottom:14px;border-bottom:1px solid var(--border);flex-wrap:wrap}
-.cat-section-title{font-size:17px;font-weight:750;color:var(--text);display:flex;align-items:center;gap:10px;margin:0}
-.cat-section-desc{color:var(--text-muted);font-size:12.5px;margin-top:4px;max-width:860px;line-height:1.5}
-.cat-section-badge{display:inline-flex;align-items:center;gap:8px;padding:5px 12px;border-radius:999px;font-size:11.5px;font-weight:700;background:rgba(59,130,246,.12);color:#93c5fd;border:1px solid rgba(59,130,246,.3)}
-
-/* Modern Explanative Finding Card */
-.finding-card{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:18px 20px;margin:12px 0;transition:border-color .15s,box-shadow .15s}
-.finding-card:hover{border-color:#3b4d6b;box-shadow:0 4px 16px rgba(0,0,0,.2)}
-.finding-top{display:flex;justify-content:space-between;align-items:flex-start;gap:16px;flex-wrap:wrap}
-.finding-title-box{flex:1;min-width:280px}
-.finding-title{font-size:15px;font-weight:700;color:var(--text);display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:4px}
-.finding-sizes{display:flex;align-items:center;gap:16px;text-align:right}
-.finding-reclaim b{font-size:18px;font-weight:800;color:var(--good);font-variant-numeric:tabular-nums;display:block}
-.finding-reclaim span{font-size:11px;color:var(--text-muted)}
-.finding-path-bar{display:flex;align-items:center;justify-content:space-between;gap:10px;background:var(--surface-subtle);border:1px solid var(--border);border-radius:8px;padding:7px 12px;margin:8px 0 14px}
-.finding-path-text{font-family:Consolas,monospace;font-size:12px;color:#cbd5e1;word-break:break-all}
-.copy-btn{background:transparent;border:1px solid var(--border);color:var(--text-muted);padding:3px 8px;border-radius:6px;font-size:10.5px;cursor:pointer;box-shadow:none}
-.copy-btn:hover{background:rgba(255,255,255,.06);color:var(--text);transform:none}
-.explain-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-top:12px}
-.explain-card{background:var(--surface-subtle);border:1px solid var(--border);border-radius:9px;padding:12px 14px}
-.explain-card-lbl{font-size:11px;font-weight:750;color:var(--text-muted);text-transform:uppercase;letter-spacing:.05em;margin-bottom:5px;display:flex;align-items:center;gap:6px}
-.explain-card-txt{font-size:12px;color:#e2e8f0;line-height:1.5;margin:0}
-.finding-tech{margin-top:12px;border-top:1px dashed var(--border);padding-top:8px}
-.finding-tech summary{cursor:pointer;font-size:11.5px;color:var(--text-muted);font-weight:600;user-select:none}
-.finding-tech summary:hover{color:var(--text)}
-.tech-pills{display:flex;gap:8px;flex-wrap:wrap;margin-top:8px}
-.tech-pill{background:rgba(255,255,255,.03);border:1px solid var(--border);padding:3px 8px;border-radius:6px;font-size:11px;color:var(--text-muted)}
-.tech-pill b{color:var(--text)}
-
-/* Legacy finding fallback */
-.finding{display:grid;grid-template-columns:minmax(240px,1.25fr) .55fr .6fr 2fr;gap:14px;border-top:1px solid var(--border);padding:14px 4px;align-items:start}
-.finding:first-child{border-top:0}
-.pill{display:inline-block;padding:3px 9px;border-radius:999px;font-size:10.5px;font-weight:750;border:1px solid transparent;letter-spacing:.02em}
-.safe,.pill.safe{background:var(--good-bg);color:var(--good);border-color:rgba(16,185,129,.35)}
-.review,.pill.review{background:var(--warn-bg);color:var(--warn);border-color:rgba(245,158,11,.35)}
-.tooling,.pill.tooling{background:rgba(59,130,246,.12);color:#93c5fd;border-color:rgba(59,130,246,.35)}
-.dont,.pill.dont{background:var(--risk-bg);color:#fca5a5;border-color:rgba(239,68,68,.35)}
-.info,.pill.info{background:var(--purple-bg);color:#d8b4fe;border-color:rgba(168,85,247,.35)}
-
-/* Tables and Charts */
-.tablewrap{overflow:auto;max-height:680px;border:1px solid var(--border);border-radius:12px;background:var(--surface-subtle)}
-table{width:100%;border-collapse:collapse}
-th,td{text-align:left;border-bottom:1px solid var(--border);padding:11px 14px;vertical-align:top}
-th{position:sticky;top:0;background:#151e2e;color:var(--text-muted);font-size:11px;text-transform:uppercase;letter-spacing:.04em;z-index:1;font-weight:700}
-td.pathcell{font-family:Consolas,monospace;font-size:12px;min-width:310px;word-break:break-all}
-tr:last-child td{border-bottom:0}
-tr:hover td{background:rgba(255,255,255,.02)}
-.twocol{display:grid;grid-template-columns:1fr 1fr;gap:16px}
-.chart{background:var(--surface-subtle);border:1px solid var(--border);border-radius:14px;padding:18px}
-.chart h3{margin:0 0 14px;font-size:15px;font-weight:700}
-.barrow{display:grid;grid-template-columns:minmax(110px,1fr) 2fr 85px;gap:12px;align-items:center;margin:9px 0}
-.barlabel{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:#cbd5e1;font-size:12px}
-.bar{height:8px;border-radius:99px;background:#1b2537;overflow:hidden}
-.bar i{display:block;height:100%;border-radius:inherit;background:linear-gradient(90deg,#3b82f6,#06b6d4)}
-.barval{text-align:right;color:var(--text-muted);font-size:11.5px;font-variant-numeric:tabular-nums}
-.diskbar{height:14px;background:#1b2537;border-radius:99px;overflow:hidden;margin:12px 0}
-.diskbar i{display:block;height:100%;background:linear-gradient(90deg,#3b82f6,#8b5cf6,#06b6d4)}
-.dupcard{border:1px solid var(--border);background:var(--surface-subtle);border-radius:12px;padding:16px;margin:12px 0}
-.dupcard .paths{margin-top:10px}
-.dupcard .paths div{padding:6px 0;border-top:1px dashed var(--border)}
-.score{font-variant-numeric:tabular-nums}
-.score strong{font-size:18px}
-.collector{border:1px solid var(--border);border-radius:10px;margin:10px 0;background:var(--surface-subtle)}
-.collector summary{cursor:pointer;padding:12px 16px;font-weight:600}
-.collector pre{white-space:pre-wrap;word-break:break-word;padding:0 16px 16px;color:#cbd5e1;font:12px/1.5 Consolas,monospace;max-height:440px;overflow:auto}
-.comparebox{border:1px dashed #384865;border-radius:12px;padding:20px;background:var(--surface-subtle)}
-.delta.plus{color:var(--risk)}
-.delta.minus{color:var(--good)}
-
-/* Overview Category Cards */
-.overview-cats{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:14px;margin-top:16px}
-.overview-cat-card{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:16px 18px;display:flex;flex-direction:column;justify-content:space-between;gap:10px;cursor:pointer;transition:all .15s}
-.overview-cat-card:hover{border-color:var(--primary);transform:translateY(-2px);box-shadow:0 6px 20px rgba(0,0,0,.25)}
-.overview-cat-top{display:flex;align-items:center;justify-content:space-between;gap:10px}
-.overview-cat-title{font-weight:750;font-size:14px;display:flex;align-items:center;gap:8px;color:var(--text)}
-.overview-cat-size{font-size:18px;font-weight:800;color:var(--good);font-variant-numeric:tabular-nums}
-.overview-cat-count{font-size:11.5px;color:var(--text-muted)}
-
-@media(max-width:1200px){
-  .stepper{grid-template-columns:repeat(4,1fr)}
-  .grid{grid-template-columns:repeat(3,1fr)}
-  .finding{grid-template-columns:1fr 1fr}
-  .explain-grid{grid-template-columns:1fr}
-}
-@media(max-width:800px){
-  .wrap{padding:16px}
-  .controls{grid-template-columns:1fr 1fr}
-  .stepper{grid-template-columns:repeat(2,1fr)}
-  .grid,.finding{grid-template-columns:1fr}
-  .twocol{grid-template-columns:1fr}
-  .toolbar input{min-width:100%}
-  .monitor-top{flex-direction:column;align-items:flex-start}
-  .explain-grid{grid-template-columns:1fr}
-}
-
-/* ReconSpace Observatory — v0.5 visual system */
-:root{
-  color-scheme:dark;
-  --bg:#060b14;
-  --surface:#0d1728;
-  --surface-card:#13213a;
-  --surface-hover:#192b49;
-  --surface-subtle:#09111f;
-  --text:#f5f8ff;
-  --text-muted:#a8b7ce;
-  --muted:#a8b7ce;
-  --text-dim:#70819c;
-  --border:#273957;
-  --border-focus:#73dfe6;
-  --primary:#6f8fff;
-  --primary-hover:#83a0ff;
-  --good:#67dfa9;
-  --good-bg:rgba(103,223,169,.11);
-  --warn:#ffc76b;
-  --warn-bg:rgba(255,199,107,.11);
-  --risk:#ff8a7e;
-  --risk-bg:rgba(255,138,126,.11);
-  --info:#68dce5;
-  --info-bg:rgba(104,220,229,.11);
-  --purple:#ad91ff;
-  --purple-bg:rgba(173,145,255,.11);
-  --rail:#091220;
-  --shadow:0 24px 70px rgba(0,0,0,.35);
-}
-html{scroll-behavior:smooth}
-body{
-  background:
-    radial-gradient(ellipse 70% 45% at 76% -10%,rgba(69,112,203,.18),transparent 70%),
-    linear-gradient(rgba(255,255,255,.018) 1px,transparent 1px),
-    linear-gradient(90deg,rgba(255,255,255,.018) 1px,transparent 1px),
-    var(--bg);
-  background-size:auto,32px 32px,32px 32px,auto;
-  font:15px/1.55 "Segoe UI Variable Text","Segoe UI",sans-serif;
-  letter-spacing:.002em;
-}
-body::before{
-  content:"";position:fixed;inset:0;pointer-events:none;z-index:-1;
-  background:linear-gradient(115deg,transparent 20%,rgba(95,136,224,.035) 48%,transparent 70%);
-}
-button,input,select,textarea{font:inherit}
-button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-visible,summary:focus-visible,[tabindex]:focus-visible{
-  outline:3px solid rgba(104,220,229,.6);outline-offset:3px;
-}
-.wrap{max-width:none;margin:0;padding:30px 34px 70px 304px}
-
-/* Permanent navigation rail */
-.hero{
-  position:fixed;inset:18px auto 18px 18px;width:252px;margin:0;padding:26px 22px;
-  display:flex;flex-direction:column;align-items:stretch;justify-content:flex-start;gap:24px;
-  background:linear-gradient(180deg,rgba(17,31,53,.98),rgba(7,15,27,.98));
-  border:1px solid rgba(119,150,196,.2);border-radius:26px;box-shadow:var(--shadow);z-index:20;overflow:hidden;
-}
-.hero::before{
-  content:"";position:absolute;width:210px;height:210px;left:-80px;top:-95px;border-radius:50%;
-  background:radial-gradient(circle,rgba(105,225,231,.19),transparent 67%);pointer-events:none;
-}
-.hero::after{
-  content:"SYSTEM OBSERVATORY";margin-top:auto;padding-top:19px;border-top:1px solid var(--border);
-  color:var(--text-dim);font:650 10px/1.4 "Cascadia Mono",Consolas,monospace;letter-spacing:.16em;
-}
-.brand{position:relative;z-index:1}
-.brand h1{display:grid;grid-template-columns:44px 1fr;column-gap:11px;row-gap:1px;align-items:center;margin:0 0 20px;font:720 23px/1 "Bahnschrift","Segoe UI Variable Display",sans-serif;letter-spacing:-.025em}
-.brand h1 .logo-icon{grid-row:1/3;width:44px;height:44px;border-radius:15px;background:radial-gradient(circle at 35% 30%,#a6fbff 0 5%,#57cdd9 18%,#416ac5 58%,#263a70 100%);font-size:0;box-shadow:0 0 0 1px rgba(138,236,242,.34),0 12px 30px rgba(52,111,198,.34)}
-.brand h1 .logo-icon::before{content:"";width:17px;height:17px;border:2px solid #e9ffff;border-radius:50%;box-shadow:0 0 14px rgba(193,255,255,.9)}
-.brand h1 .version-badge{grid-column:2;background:none;border:0;padding:0;color:#7f91ac;border-radius:0;font:600 10px/1.2 "Cascadia Mono",Consolas,monospace;letter-spacing:.12em}
-.brand p{max-width:none;margin:0;color:#b7c6d9;font-size:13px;line-height:1.65}
-.brand p b{color:#dffeff;font-weight:650}
-.badges{display:grid;gap:9px;margin-top:4px}
-.badge,.badge.dim{justify-content:flex-start;width:100%;padding:9px 11px;background:rgba(255,255,255,.025);border:1px solid rgba(125,151,188,.15);border-radius:11px;color:#b7c6da;font-size:10px;letter-spacing:.06em}
-.badge:first-child{background:var(--good-bg);border-color:rgba(103,223,169,.24);color:#8ce9c0}
-
-/* Scan composer */
-.panel,.monitor-card{border:1px solid rgba(119,150,196,.2);box-shadow:var(--shadow)}
-.hero + .panel{
-  position:relative;margin:0 0 20px;padding:32px;border-radius:24px;
-  background:linear-gradient(135deg,rgba(18,34,58,.98),rgba(10,19,34,.98));overflow:hidden;
-}
-.hero + .panel::after{
-  content:"";position:absolute;right:-100px;top:-150px;width:330px;height:330px;border-radius:50%;pointer-events:none;
-  background:radial-gradient(circle,rgba(112,143,255,.14),transparent 67%);
-}
-.controls{position:relative;z-index:1;grid-template-columns:minmax(260px,2fr) minmax(180px,1fr) minmax(165px,.9fr) auto auto;gap:14px}
-.controls::before{
-  content:"Map this PC";grid-column:1/-1;margin-bottom:7px;color:var(--text);
-  font:700 clamp(25px,3vw,38px)/1.05 "Bahnschrift","Segoe UI Variable Display",sans-serif;letter-spacing:-.035em;
-}
-.field label{color:#8fa2bd;font-size:10px;letter-spacing:.12em}
-.field input,.field select,.field textarea,.toolbar input,.toolbar select{
-  min-height:45px;background:rgba(3,9,18,.72);border-color:#304362;border-radius:12px;color:var(--text);padding:11px 14px;
-}
-.field input:hover,.field select:hover,.field textarea:hover{border-color:#476383}
-.small{color:var(--text-muted)}
-.quick-chips{gap:7px;margin-top:9px}
-.chip{padding:4px 9px;border-radius:8px;background:rgba(105,143,255,.06);border-color:#2a3d5c;color:#a9bdd8}
-.chip:hover{background:rgba(104,220,229,.12);border-color:#4a8b9c;color:#ddfcff}
-button{min-height:45px;padding:10px 19px;border-radius:12px;background:linear-gradient(135deg,#7696ff,#5777e7);font-weight:700;box-shadow:0 10px 26px rgba(73,103,208,.27)}
-button:hover:not(:disabled){background:linear-gradient(135deg,#89a5ff,#6484ee);box-shadow:0 12px 30px rgba(73,103,208,.35)}
-button.dangerish{background:rgba(255,138,126,.09);border-color:rgba(255,138,126,.3);color:#ffb1a9}
-.advanced{margin-top:21px;padding-top:17px;border-color:#293c59}
-.advanced summary{width:max-content;color:#b9c8db;font-size:13px}
-
-/* Signature: storage radar */
-.monitor-card{
-  position:relative;min-height:292px;margin:20px 0;padding:28px 28px 24px 242px;border-radius:24px;overflow:hidden;
-  background:linear-gradient(145deg,rgba(11,23,41,.98),rgba(8,16,29,.98));
-}
-.monitor-card::before{
-  content:"";position:absolute;left:45px;top:47px;width:142px;height:142px;border-radius:50%;
-  background:
-    radial-gradient(circle at center,#86f5f2 0 3px,transparent 4px 22px,rgba(102,220,229,.22) 23px 24px,transparent 25px 45px,rgba(111,143,255,.24) 46px 47px,transparent 48px 64px,rgba(111,143,255,.13) 65px 66px,transparent 67px),
-    conic-gradient(from 15deg,transparent 0 68%,rgba(104,220,229,.72) 82%,transparent 96%);
-  border:1px solid rgba(109,223,230,.27);box-shadow:0 0 50px rgba(68,140,213,.18),inset 0 0 40px rgba(63,115,191,.09);
-  animation:radarSweep 5s linear infinite;
-}
-.monitor-card::after{
-  content:"SYSTEM MAP";position:absolute;left:73px;top:205px;color:#7f93ae;font:650 10px/1 "Cascadia Mono",Consolas,monospace;letter-spacing:.18em;
-}
-.monitor-card:has(.status-pill.running)::before{animation-duration:1.8s;box-shadow:0 0 70px rgba(84,202,221,.34),inset 0 0 42px rgba(73,143,214,.16)}
-.monitor-card:has(.status-pill.done)::before{background:radial-gradient(circle at center,#baffdb 0 5px,transparent 6px 23px,rgba(103,223,169,.28) 24px 25px,transparent 26px 48px,rgba(103,223,169,.2) 49px 50px,transparent 51px);animation:none}
-@keyframes radarSweep{to{transform:rotate(360deg)}}
-.monitor-top{padding-bottom:15px;border-color:#283b58}
-.monitor-status{align-items:center}
-.status-pill{padding:7px 12px;font-size:10px;letter-spacing:.1em;text-transform:uppercase}
-.status{font-size:14px;color:#d7e2f0}
-.monitor-metrics{gap:8px}
-.metric-box{background:#08111f;border-color:#2b3d5a;border-radius:9px;color:#91a4c0}
-.stepper-wrap{margin:17px 0 12px}
-.stepper-title{margin-bottom:9px;color:#778ba8;font:650 9px/1.4 "Cascadia Mono",Consolas,monospace;letter-spacing:.16em}
-.stepper{grid-template-columns:repeat(7,minmax(105px,1fr));gap:7px;overflow-x:auto;padding-bottom:3px}
-.step-node{min-width:105px;padding:9px 10px;border-radius:10px;background:#08111f;border-color:#233654}
-.step-node.active{border-color:#58cbd4;background:rgba(78,181,198,.1);box-shadow:0 0 18px rgba(74,190,202,.12)}
-.step-node.completed{border-color:rgba(103,223,169,.26);background:rgba(103,223,169,.045)}
-.step-name{font-size:11px}.step-desc{font-size:9px}.step-header{font-size:9px}
-.progress{height:9px;background:#07101d;border-color:#243654}
-.progress>i{background:linear-gradient(90deg,#5878de,#6f8fff 48%,#68dce5)}
-.progress-detail{font-size:12px;color:#c8d5e6}.progress-pct{color:#83e8ec;font-family:"Cascadia Mono",Consolas,monospace}
-.reassurance-note{background:rgba(104,220,229,.06);border-color:rgba(104,220,229,.19);color:#c1f7fa}
-.activity-card{background:#07101d;border-color:#233653}
-.activity-header{background:rgba(255,255,255,.018);border-color:#233653;letter-spacing:.08em}
-.activity-feed{color:#a9bad1}
-
-/* Results command center */
-#summary{margin-top:25px}
-#summary > .grid{grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}
-.metric{position:relative;min-height:116px;padding:18px 19px;border-color:#273b59;border-radius:16px;background:linear-gradient(145deg,#111e33,#0b1526);overflow:hidden}
-.metric::after{content:"";position:absolute;right:-24px;bottom:-36px;width:90px;height:90px;border-radius:50%;background:radial-gradient(circle,rgba(111,143,255,.11),transparent 70%)}
-.metric b{font:720 26px/1.2 "Bahnschrift","Segoe UI Variable Display",sans-serif;letter-spacing:-.025em;color:#f6f9ff}
-.metric span:first-child{text-transform:uppercase;letter-spacing:.1em;font-size:9px;color:#8498b5}
-#summary > .panel:first-of-type{padding:19px 22px;border-radius:18px;background:#0d182a}
-#summary > .panel:last-of-type{display:grid;grid-template-columns:224px minmax(0,1fr);gap:0;padding:0;border-radius:22px;background:#0c1627;overflow:hidden}
-.tabs{display:flex;flex-direction:column;align-items:stretch;gap:4px;margin:0;padding:19px 12px;background:#091321;border-right:1px solid #263954;max-height:calc(100vh - 38px);overflow-y:auto;position:sticky;top:18px;align-self:start}
-.tabs::before{content:"AUDIT MAP";padding:2px 11px 10px;color:#7286a4;font:650 9px/1 "Cascadia Mono",Consolas,monospace;letter-spacing:.16em}
-.tab{width:100%;min-height:38px;justify-content:flex-start;padding:8px 10px;border:1px solid transparent;border-radius:10px;background:transparent;color:#9dafc7;box-shadow:none;font-size:12px}
-.tab:hover{background:#111f35;color:#ecf4ff;transform:none;box-shadow:none}
-.tab.active{background:linear-gradient(90deg,rgba(104,220,229,.13),rgba(111,143,255,.08));border-color:rgba(104,220,229,.26);color:#f1fcff;box-shadow:inset 3px 0 #66d7df}
-.tab-count{margin-left:auto;background:#14243d;color:#8ea4c2}
-.tab[data-view="findings"],.tab[data-view="apps"],.tab[data-view="startup"],.tab[data-view="health"]{margin-top:9px;padding-top:10px;border-top-color:#253751}
-#view{min-width:0;padding:28px 30px 34px}
-.decision-brief{display:grid;grid-template-columns:minmax(0,1.4fr) minmax(260px,.6fr);gap:12px;margin-bottom:16px}
-.brief-main,.brief-next,.scope-band,.depth-card,.plan-lane,.plan-item{border:1px solid #273b59;background:#0a1424;border-radius:16px}
-.brief-main{padding:23px;display:grid;grid-template-columns:auto 1fr;gap:18px;align-items:center}
-.health-orb{width:82px;height:82px;border-radius:50%;display:grid;place-items:center;border:1px solid rgba(104,220,229,.35);background:radial-gradient(circle,rgba(104,220,229,.2),rgba(111,143,255,.06) 62%,transparent 64%);font:720 18px/1 "Bahnschrift",sans-serif;color:#c9fcff}
-.health-orb.critical{border-color:rgba(255,138,126,.45);background:radial-gradient(circle,rgba(255,138,126,.2),rgba(255,138,126,.04) 62%,transparent 64%);color:#ffd0cb}
-.health-orb.low{border-color:rgba(255,199,107,.45);background:radial-gradient(circle,rgba(255,199,107,.17),rgba(255,199,107,.03) 62%,transparent 64%);color:#ffe3ad}
-.brief-kicker,.depth-status,.lane-kicker{font:650 9px/1.3 "Cascadia Mono",Consolas,monospace;letter-spacing:.14em;text-transform:uppercase;color:#7f94b1}
-.brief-main h2,.brief-next h3{margin:5px 0 7px;font:700 22px/1.15 "Bahnschrift",sans-serif}.brief-main p,.brief-next p{margin:0;color:#adbed4}
-.brief-next{padding:22px;background:linear-gradient(145deg,rgba(20,43,66,.96),rgba(11,24,41,.96));border-color:rgba(104,220,229,.24)}
-.brief-next button{margin-top:14px;width:100%}
-.scope-band{display:grid;grid-template-columns:auto 1fr;gap:12px;padding:14px 16px;margin-bottom:16px;background:rgba(104,220,229,.055)}
-.scope-band strong{color:#d9fcff}.scope-band p{margin:1px 0 0;color:#a8bad1}
-.decision-numbers{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:9px;margin-bottom:16px}.decision-number{padding:15px;border:1px solid #263a58;border-radius:13px;background:#0a1424}.decision-number b{display:block;font:700 19px/1.2 "Bahnschrift",sans-serif}.decision-number span{font-size:10px;color:#8498b5;text-transform:uppercase;letter-spacing:.08em}
-.depth-heading{display:flex;justify-content:space-between;gap:12px;align-items:end;margin:20px 0 9px}.depth-heading h3{margin:0}.depth-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:9px}.depth-card{padding:15px}.depth-card-top{display:flex;justify-content:space-between;gap:10px;align-items:start}.depth-card h4{margin:2px 0 5px;font-size:14px}.depth-card p{margin:0;color:#93a6c0;font-size:12px}.depth-status{padding:5px 7px;border-radius:7px;white-space:nowrap}.depth-status.complete{color:#82e6b9;background:rgba(103,223,169,.1)}.depth-status.partial{color:#ffd384;background:rgba(255,199,107,.1)}.depth-status.blocked{color:#ffaaa1;background:rgba(255,138,126,.1)}.depth-status.not_available{color:#aebdd0;background:rgba(174,189,208,.08)}
-.depth-meta{margin-top:9px;padding-top:8px;border-top:1px dashed #273957;color:#8ea2bd;font-size:11px}.depth-limit{color:#ffc983}
-.plan-intro{display:grid;grid-template-columns:1.15fr .85fr;gap:12px;margin-bottom:14px}.plan-lane{padding:20px}.plan-lane h2,.plan-lane h3{margin:5px 0 8px}.plan-steps{margin:11px 0 0;padding-left:20px;color:#b8c6d8}.plan-steps li{margin:7px 0}.plan-list{display:grid;gap:10px;margin-top:10px}.plan-item{padding:17px}.plan-item-head{display:flex;justify-content:space-between;gap:16px;align-items:start}.plan-item h4{margin:0 0 4px}.plan-item-size{text-align:right;white-space:nowrap}.plan-item-size b{display:block;color:#80e5b8}.plan-item-path{margin:10px 0;padding:8px 10px;border:1px solid #223550;border-radius:8px;background:#07101d;color:#9fb1c8;font:11px/1.45 "Cascadia Mono",Consolas,monospace;overflow-wrap:anywhere}.plan-explain{display:grid;grid-template-columns:1fr 1fr;gap:9px}.plan-explain div{padding:10px;border-radius:9px;background:#081321}.plan-explain b{display:block;margin-bottom:3px;font-size:10px;text-transform:uppercase;letter-spacing:.08em;color:#8195b1}.plan-explain p{margin:0;font-size:12px;color:#b8c6d8}.plan-empty{padding:22px;text-align:center;color:#9cafc8}
-.chart,.cat-section,.finding-card,.overview-cat-card,.comparebox,.dupcard,.tablewrap,.collector{background:#0a1424;border-color:#273b59}
-.chart{padding:20px;border-radius:16px}.chart h3{font:680 16px/1.3 "Bahnschrift","Segoe UI Variable Display",sans-serif}
-.diskbar{height:12px;background:#15233a}.diskbar i{background:linear-gradient(90deg,#5b79df,#788fff,#64dae4)}
-.overview-cats{grid-template-columns:repeat(auto-fill,minmax(255px,1fr));gap:11px}
-.overview-cat-card{border-radius:15px}.overview-cat-card:hover{border-color:#5fbfc9;box-shadow:0 12px 30px rgba(0,0,0,.22)}
-.overview-cat-size{color:#82e6be}.cat-pill.active{background:rgba(105,143,255,.18);border-color:#667fc9}
-.finding-card{border-radius:15px}.finding-path-bar,.explain-card{background:#07101d;border-color:#243653}
-.tablewrap{border-radius:14px}th{background:#101e33;color:#9bacc4}th,td{padding:12px 14px}tr:hover td{background:rgba(104,220,229,.025)}
-.bar{background:#15243a}.bar i{background:linear-gradient(90deg,#6c88ef,#67dbe4)}
-.notice{background:rgba(255,199,107,.08);color:#ffe5b6;border-left-color:#ffc76b}.error{background:rgba(255,138,126,.09);color:#ffd5d0;border-left-color:#ff8a7e}
-.safe,.pill.safe{color:#83e9bc}.review,.pill.review{color:#ffd080}.tooling,.pill.tooling{color:#9fb3ff}.dont,.pill.dont{color:#ffa69d}.info,.pill.info{color:#c4b2ff}
-
-@media(max-width:1120px){
-  .wrap{padding-left:280px;padding-right:22px}.hero{width:236px}
-  .controls{grid-template-columns:1fr 1fr}.controls::before{grid-column:1/-1}.monitor-card{padding-left:28px;padding-top:218px}.monitor-card::before{left:calc(50% - 71px);top:38px}.monitor-card::after{left:calc(50% - 46px);top:190px}
-  #summary > .grid{grid-template-columns:repeat(2,1fr)}
-  .decision-brief,.plan-intro{grid-template-columns:1fr}.decision-numbers{grid-template-columns:repeat(2,1fr)}
-}
-@media(max-width:760px){
-  .wrap{padding:14px 14px 44px}.hero{position:relative;inset:auto;width:auto;height:auto;padding:18px;border-radius:19px;gap:12px;margin-bottom:14px}.hero::after{display:none}.brand h1{margin-bottom:11px}.brand p{font-size:12px}.badges{grid-template-columns:1fr 1fr}.badge:last-child{display:none}
-  .hero + .panel{padding:22px 17px;border-radius:19px}.controls{grid-template-columns:1fr}.controls::before{font-size:28px}
-  .monitor-card{padding:205px 17px 18px;border-radius:19px}.monitor-card::before{top:34px}.monitor-card::after{top:185px}
-  .monitor-top{align-items:stretch}.monitor-metrics{width:100%;display:grid;grid-template-columns:1fr 1fr}.monitor-metrics #profileHint{grid-column:1/-1}
-  .stepper{grid-template-columns:repeat(7,120px)}
-  #summary > .grid{grid-template-columns:1fr}
-  #summary > .panel:last-of-type{display:block}.tabs{position:static;max-height:none;display:flex;flex-direction:row;overflow-x:auto;border-right:0;border-bottom:1px solid #263954;padding:12px}.tabs::before{display:none}.tab{width:auto;flex:0 0 auto}.tab:nth-child(n){margin-top:0;border-top-color:transparent}
-  #view{padding:20px 15px 26px}.twocol{grid-template-columns:1fr}.toolbar input{min-width:100%}
-  .brief-main{grid-template-columns:1fr}.health-orb{width:68px;height:68px}.decision-numbers,.depth-grid,.plan-explain{grid-template-columns:1fr}.plan-item-head{display:block}.plan-item-size{text-align:left;margin-top:8px}
-}
-@media(prefers-reduced-motion:reduce){
-  *,*::before,*::after{animation-duration:.01ms!important;animation-iteration-count:1!important;scroll-behavior:auto!important;transition-duration:.01ms!important}
-}
-
-/* ReconSpace Care — CleanMyMac-inspired desktop experience */
-:root{
-  --bg:#171123;--surface:#251b35;--surface-card:rgba(255,255,255,.075);--surface-hover:rgba(255,255,255,.11);
-  --surface-subtle:rgba(13,9,24,.48);--text:#fff;--text-muted:#c9bfd8;--text-dim:#958aa8;
-  --border:rgba(255,255,255,.12);--border-focus:#c59cff;--primary:#a763ff;--primary-hover:#b779ff;
-  --good:#76efbe;--warn:#ffc76b;--risk:#ff8b9c;--info:#77ddef;--purple:#c68cff;
-  --shadow:0 30px 90px rgba(5,0,14,.42);
-}
-html{background:#100b18}
-body{
-  padding-top:38px;min-width:320px;background:
-    radial-gradient(ellipse 70% 90% at 92% 10%,rgba(122,58,208,.34),transparent 62%),
-    radial-gradient(ellipse 62% 65% at 35% 105%,rgba(27,107,184,.24),transparent 66%),
-    linear-gradient(145deg,#191126 0%,#100b19 48%,#1b1230 100%);
-  background-attachment:fixed;font-family:"Segoe UI Variable Text","Segoe UI",sans-serif;
-}
-body::before{z-index:0;background:radial-gradient(circle at 75% 14%,rgba(255,255,255,.035),transparent 28%);mix-blend-mode:screen}
-.window-chrome{
-  position:fixed;z-index:100;inset:0 0 auto 0;height:38px;padding:0 14px;display:flex;align-items:center;gap:8px;
-  color:rgba(255,255,255,.65);background:rgba(17,11,27,.9);border-bottom:1px solid rgba(255,255,255,.08);backdrop-filter:blur(26px);
-  -webkit-app-region:drag;font-size:11px;
-}
-.traffic{display:none}
-.traffic-red{background:#ff5f57}.traffic-amber{background:#ffbd2e}.traffic-green{background:#28c840}
-.window-title{display:flex;align-items:center;gap:7px;font-weight:650;letter-spacing:.02em}.mini-brand{width:20px;height:20px;display:grid;place-items:center;border-radius:6px;background:linear-gradient(145deg,#c977ff,#5bc9ed);color:#fff;font-size:10px}.window-actions{height:38px;margin:-0px -14px 0 auto;display:flex;align-items:stretch;letter-spacing:0}.window-actions i{width:46px;display:grid;place-items:center;font-style:normal;font-size:12px}.window-actions i:hover{background:rgba(255,255,255,.08)}.window-actions i:last-child:hover{background:#c42b1c;color:#fff}
-.wrap{position:relative;z-index:1;max-width:none;margin:0;padding:0}
-.hero{
-  position:fixed;z-index:30;inset:38px auto 0 0;width:238px;height:auto;margin:0;padding:27px 16px 18px;
-  display:flex;flex-direction:column;align-items:stretch;gap:17px;border:0;border-right:1px solid rgba(255,255,255,.1);border-radius:0;
-  background:linear-gradient(180deg,rgba(38,26,54,.88),rgba(21,15,31,.82));box-shadow:none;backdrop-filter:blur(34px);overflow-y:auto;
-}
-.hero::before{width:260px;height:260px;left:-130px;top:-130px;background:radial-gradient(circle,rgba(182,104,255,.16),transparent 70%)}
-.hero::after{display:none}.brand{padding:0 9px}.brand h1{grid-template-columns:40px 1fr;column-gap:10px;margin:0;font-family:inherit;font-size:20px;font-weight:720}
-.brand h1 .logo-icon{width:40px;height:40px;border-radius:13px;background:conic-gradient(from 210deg,#64e7ee,#5969ef,#b052ed,#ff698d,#ffbf67,#64e7ee);box-shadow:0 9px 30px rgba(144,73,224,.34)}
-.brand h1 .logo-icon::before{width:17px;height:17px;border-width:3px;border-color:rgba(255,255,255,.94);box-shadow:none}
-.brand h1 .version-badge{font-family:inherit;font-size:10px;letter-spacing:.04em;color:#a99db9}
-.rail-nav{display:flex;flex-direction:column;gap:3px}.rail-label{padding:14px 14px 5px;color:#8f829f;font-size:10px;font-weight:720;text-transform:uppercase;letter-spacing:.11em}
-.rail-item{
-  min-height:42px;width:100%;padding:8px 12px;justify-content:flex-start;gap:12px;background:transparent;border:1px solid transparent;border-radius:12px;
-  box-shadow:none;color:#bdb2ca;font-size:13px;font-weight:580;
-}
-.rail-item:hover:not(:disabled){transform:none;background:rgba(255,255,255,.06);box-shadow:none;color:#fff}
-.rail-item.active{color:#fff;background:linear-gradient(100deg,rgba(191,118,255,.27),rgba(111,86,211,.12));border-color:rgba(218,181,255,.18);box-shadow:inset 3px 0 #d9adff}
-.rail-icon{width:24px;height:24px;display:grid;place-items:center;border-radius:8px;color:#e2b9ff;font-size:17px;background:rgba(190,117,255,.1)}
-.badges{display:flex;flex-direction:column;gap:8px;margin-top:auto}.assistant-card{display:grid;grid-template-columns:34px 1fr auto;gap:9px;align-items:center;padding:11px;background:rgba(255,255,255,.055);border:1px solid rgba(255,255,255,.09);border-radius:13px;color:#f7f1ff}
-.assistant-orb{width:34px;height:34px;display:grid;place-items:center;border-radius:11px;background:linear-gradient(145deg,#ca7dff,#6b68e9);box-shadow:0 8px 18px rgba(134,79,219,.25)}
-.assistant-card b,.assistant-card small{display:block}.assistant-card b{font-size:11px}.assistant-card small{font-size:9px;color:#aa9dbb}.assistant-arrow{font-size:19px;color:#a99cb9}
-.badge,.badge.dim{width:100%;min-height:0;padding:6px 9px;border:0;background:transparent;color:#887b98;font-size:8px;letter-spacing:.08em}.badge:first-of-type{background:transparent;border:0;color:#65dbaa}
-.workspace{min-width:0;margin-left:238px;padding:28px 34px 68px;max-width:1560px}
-.workspace-head{height:54px;display:flex;align-items:flex-start;justify-content:space-between;margin:0 3px 16px}.workspace-kicker{color:#9e90ae;font-size:10px;font-weight:650;letter-spacing:.08em;text-transform:uppercase}.workspace-head h1{margin:0;font-size:26px;line-height:1.15;letter-spacing:-.035em}.workspace-actions{display:flex;gap:8px}
-.round-action{min-height:36px;width:36px;height:36px;padding:0;display:grid;place-items:center;border:1px solid rgba(255,255,255,.11);border-radius:50%;background:rgba(255,255,255,.055);color:#d8cde4;box-shadow:none;font-size:10px}.round-action:hover:not(:disabled){transform:none;background:rgba(255,255,255,.1);box-shadow:none}
-.workspace > .panel:first-of-type{
-  position:relative;margin:0;padding:0;border:1px solid rgba(255,255,255,.13);border-radius:28px;overflow:hidden;
-  background:linear-gradient(135deg,rgba(99,52,139,.62),rgba(48,31,81,.88) 47%,rgba(29,22,48,.96));box-shadow:0 32px 90px rgba(4,0,15,.38);
-}
-.workspace > .panel:first-of-type::before{content:"";position:absolute;inset:0;background:radial-gradient(circle at 65% 30%,rgba(192,110,255,.24),transparent 34%),radial-gradient(circle at 78% 17%,rgba(89,186,255,.14),transparent 29%);pointer-events:none}
-.smart-stage{position:relative;z-index:1;min-height:275px;display:grid;grid-template-columns:minmax(330px,.85fr) minmax(370px,1.15fr);align-items:center;padding:36px 52px 18px}
-.smart-copy{max-width:470px}.smart-eyebrow{display:inline-block;margin-bottom:13px;color:#e1baff;font-size:11px;font-weight:720;text-transform:uppercase;letter-spacing:.12em}.smart-copy h2{margin:0;font-size:clamp(38px,4.4vw,64px);font-weight:720;line-height:.93;letter-spacing:-.06em}.smart-copy h2 span{background:linear-gradient(90deg,#fff,#d8afff 55%,#8ee8ff);-webkit-background-clip:text;background-clip:text;color:transparent}.smart-copy p{max-width:430px;margin:20px 0 0;color:#d4c9df;font-size:14px;line-height:1.6}
-.care-visual{position:relative;height:235px;display:grid;place-items:center;filter:drop-shadow(0 30px 38px rgba(5,0,20,.3))}.halo{position:absolute;border-radius:50%;border:1px solid rgba(225,192,255,.2)}.halo-one{width:224px;height:224px;box-shadow:0 0 50px rgba(195,101,255,.12),inset 0 0 50px rgba(121,105,255,.08)}.halo-two{width:170px;height:170px;border-color:rgba(131,224,255,.17);animation:carePulse 3.5s ease-in-out infinite}.care-core{position:relative;width:126px;height:126px;display:grid;place-items:center;border-radius:38px;background:linear-gradient(145deg,rgba(255,255,255,.22),rgba(105,70,177,.32));border:1px solid rgba(255,255,255,.27);box-shadow:inset 0 1px 1px rgba(255,255,255,.35),0 23px 48px rgba(40,10,78,.48);transform:rotate(-5deg)}
-.windows-mark{width:56px;height:56px;display:grid;grid-template-columns:1fr 1fr;gap:4px;transform:rotate(5deg)}.windows-mark i{display:block;background:linear-gradient(145deg,#c4fbff,#66d1ff 60%,#7d78ff);box-shadow:0 0 16px rgba(100,219,255,.45)}.spark{position:absolute;color:#f3d8ff;text-shadow:0 0 14px currentColor}.spark-a{left:18%;top:23%;font-size:22px}.spark-b{right:18%;bottom:21%;font-size:17px;color:#85eaff}.spark-c{right:24%;top:16%;font-size:24px;color:#ffb5dd}
-@keyframes carePulse{50%{transform:scale(1.07);opacity:.6}}
-.care-strip{position:relative;z-index:1;display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:9px;padding:0 28px 22px}
-.care-tile{min-width:0;min-height:74px;display:grid;grid-template-columns:36px 1fr;align-items:center;gap:9px;padding:12px;border:1px solid rgba(255,255,255,.12);border-radius:16px;background:rgba(16,10,29,.31);backdrop-filter:blur(18px);box-shadow:inset 0 1px rgba(255,255,255,.05)}
-.care-tile-icon{width:36px;height:36px;display:grid;place-items:center;border-radius:12px;font-size:20px;background:rgba(255,255,255,.1)}.care-tile b,.care-tile small{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.care-tile b{font-size:11px}.care-tile small{color:#b9acc7;font-size:9px}.care-tile em{grid-column:2;color:#bfb1cb;font-size:8px;font-style:normal;text-transform:uppercase;letter-spacing:.1em;margin-top:-13px}.cleanup .care-tile-icon{color:#8eeeff;background:rgba(73,211,234,.12)}.protection .care-tile-icon{color:#83e8b8;background:rgba(75,220,157,.12)}.performance .care-tile-icon{color:#ffd17f;background:rgba(255,191,84,.12)}.applications .care-tile-icon{color:#ff98c8;background:rgba(255,95,169,.12)}.clutter .care-tile-icon{color:#c39cff;background:rgba(170,101,255,.14)}
-.setup-label{position:relative;z-index:1;display:flex;justify-content:space-between;padding:16px 30px 8px;border-top:1px solid rgba(255,255,255,.09);color:#eee6f5;font-size:11px;font-weight:650}.setup-label span:last-child{color:#978aa5;font-weight:500}
-.controls{position:relative;z-index:1;display:grid;grid-template-columns:minmax(250px,2fr) minmax(160px,.72fr) minmax(155px,.7fr) 92px auto;gap:10px;align-items:end;padding:0 28px 25px}
-.controls::before{display:none}.controls .field label{color:#9e91ad;font-size:8px;letter-spacing:.12em}.controls .field input,.controls .field select{min-height:44px;border:1px solid rgba(255,255,255,.12);border-radius:12px;background:rgba(11,7,21,.42);color:#fff}.controls .field input:hover,.controls .field select:hover{border-color:rgba(211,168,255,.36)}
-.quick-chips{display:none}#rootHelp{display:none}#scan{width:76px;height:76px;min-height:76px;margin-bottom:-15px;padding:0;align-self:end;justify-content:center;flex-direction:column;gap:3px;border:1px solid rgba(255,255,255,.38);border-radius:50%;background:linear-gradient(145deg,#c977ff,#8752ee);box-shadow:0 15px 38px rgba(132,67,226,.42),inset 0 1px 2px rgba(255,255,255,.44);font-size:11px}#scan:hover:not(:disabled){transform:scale(1.04);background:linear-gradient(145deg,#d68bff,#9565f2);box-shadow:0 18px 45px rgba(132,67,226,.52)}.scan-play{font-size:17px;margin-left:3px}#cancel{min-height:38px;margin-bottom:4px;padding:8px 11px;border-radius:10px;font-size:10px}
-.workspace > .panel:first-of-type .advanced{position:relative;z-index:1;margin:0;padding:13px 29px 20px;border-top:1px solid rgba(255,255,255,.08);background:rgba(9,6,17,.2)}.advanced summary{color:#b5a8c3;font-size:11px}
-.monitor-card{position:relative;min-height:0;margin:18px 0;padding:24px;border:1px solid rgba(255,255,255,.11);border-radius:24px;background:linear-gradient(145deg,rgba(43,31,59,.92),rgba(24,18,36,.94));box-shadow:0 24px 70px rgba(4,0,13,.28);overflow:hidden}.monitor-card::before{content:"";position:absolute;left:auto;right:-80px;top:-130px;width:330px;height:330px;border:0;border-radius:50%;background:radial-gradient(circle,rgba(158,88,242,.18),transparent 66%);box-shadow:none;animation:none}.monitor-card::after{display:none}.monitor-card:has(.status-pill.running)::before,.monitor-card:has(.status-pill.done)::before{animation:none;box-shadow:none}.monitor-top{position:relative;padding-bottom:17px;border-color:rgba(255,255,255,.09)}.status-pill{border-color:rgba(255,255,255,.1)!important;background:rgba(255,255,255,.07)!important}.status-pill.running{color:#d9b2ff!important}.status-pill.done{color:#7be7b7!important}.metric-box{border-color:rgba(255,255,255,.09);background:rgba(10,6,18,.3)}
-.stepper{grid-template-columns:repeat(7,minmax(112px,1fr));gap:7px}.step-node{background:rgba(12,8,22,.35);border-color:rgba(255,255,255,.09)}.step-node.active{border-color:rgba(207,146,255,.47);background:rgba(166,93,240,.12);box-shadow:0 0 20px rgba(163,92,238,.1)}.step-node.completed{border-color:rgba(103,223,169,.28);background:rgba(103,223,169,.06)}.progress{background:rgba(7,4,14,.55);border-color:rgba(255,255,255,.08)}.progress>i{background:linear-gradient(90deg,#a657ef,#d177ff,#79dff0)}.progress-pct{color:#deb4ff}.reassurance-note{background:rgba(130,95,211,.1);border-color:rgba(190,145,255,.22);color:#e4d2f5}.activity-card{background:rgba(8,5,15,.34);border-color:rgba(255,255,255,.08)}.activity-header{border-color:rgba(255,255,255,.08)}
-#summary > .panel:first-of-type{background:rgba(37,26,52,.9)}#summary > .panel:last-of-type{background:rgba(27,20,40,.94)}.tabs{background:rgba(18,13,28,.76);border-color:rgba(255,255,255,.09)}.tab.active{background:linear-gradient(90deg,rgba(191,118,255,.19),rgba(104,98,224,.08));border-color:rgba(205,158,255,.25);box-shadow:inset 3px 0 #ce9cff}.tab:hover{background:rgba(255,255,255,.06)}.metric,.brief-main,.brief-next,.scope-band,.depth-card,.plan-lane,.plan-item,.chart,.cat-section,.finding-card,.overview-cat-card,.comparebox,.dupcard,.tablewrap,.collector{border-color:rgba(255,255,255,.1);background:rgba(35,25,49,.86)}
-@media(max-width:1180px){.smart-stage{grid-template-columns:1fr 1fr;padding-left:34px;padding-right:34px}.care-strip{grid-template-columns:repeat(3,1fr)}.controls{grid-template-columns:1fr 1fr 1fr}.controls #scan{grid-row:2}.controls #cancel{grid-row:2}.workspace{padding-left:24px;padding-right:24px}}
-@media(max-width:820px){body{padding-top:34px}.window-chrome{height:34px}.hero{position:relative;inset:auto;width:auto;min-height:0;margin:0;padding:13px 16px;flex-direction:row;align-items:center;border-right:0;border-bottom:1px solid rgba(255,255,255,.1);overflow-x:auto}.brand{padding:0}.brand h1{grid-template-columns:34px auto}.brand h1 .logo-icon{width:34px;height:34px}.brand h1 .version-badge,.rail-label,.badges{display:none}.rail-nav{margin-left:auto;flex-direction:row}.rail-item{width:auto;min-height:36px;padding:6px 9px}.rail-item span:last-child{display:none}.rail-icon{width:23px;height:23px}.workspace{margin-left:0;padding:18px 14px 45px}.workspace-head{height:46px}.smart-stage{grid-template-columns:1fr;min-height:0;padding:32px 25px 12px}.smart-copy{text-align:center;margin:auto}.smart-copy h2{font-size:43px}.care-visual{height:205px}.care-strip{grid-template-columns:1fr 1fr;padding:0 16px 18px}.care-tile:last-child{grid-column:1/-1}.controls{grid-template-columns:1fr;padding:0 17px 24px}.controls #scan{grid-row:auto;margin:5px auto 0}.controls #cancel{grid-row:auto;margin:auto}.setup-label{padding-left:18px;padding-right:18px}.setup-label span:last-child{display:none}.monitor-card{padding:20px}.stepper{grid-template-columns:repeat(7,120px)}}
-@media(max-width:480px){.workspace-actions{display:none}.smart-copy h2{font-size:37px}.care-strip{grid-template-columns:1fr}.care-tile:last-child{grid-column:auto}.care-visual{transform:scale(.88);margin:-10px 0}.workspace > .panel:first-of-type{border-radius:21px}.monitor-card{border-radius:20px}.rail-item:nth-of-type(n+4){display:none}}
-/* Unified module workspace */
-:root{--surface-subtle:#211d32;--border:rgba(201,189,230,.12);--primary:#a982f4;--primary-hover:#bc9bff}
-body{background:radial-gradient(ellipse at 95% 0%,#302043 0%,transparent 50%),#15121e}
-.window-chrome{display:none}body{padding-top:0}.hero{top:0;width:216px;background:#191522;padding:24px 13px}.workspace{margin-left:216px;padding:26px 30px 46px;max-width:1600px}.brand h1{font-size:18px}.rail-item{min-height:43px}.rail-icon{background:transparent}.rail-item.active{background:#352747;border-color:transparent;box-shadow:inset 3px 0 #c6a2fc}.assistant-card{text-align:left;white-space:normal;box-shadow:none;min-height:64px}.workspace-head{height:52px;margin-bottom:18px}.workspace-kicker{font-size:9px}.workspace-head h1{font-size:25px;margin-top:4px}.workspace-actions button{min-height:36px;font-size:11px}
-#scanComposer{background:radial-gradient(ellipse at 80% 0%,rgba(163,113,233,.16),transparent 65%),#262033;border-radius:20px;padding:0;overflow:hidden;border-color:rgba(209,188,239,.13)}
-.smart-stage{min-height:230px;padding:28px 36px 20px;grid-template-columns:1.2fr .8fr}.smart-copy h2{font-size:44px;line-height:1.02;letter-spacing:-.045em}.smart-copy p{font-size:13px;margin-top:16px;max-width:410px}.smart-eyebrow{font-size:9px;margin-bottom:12px}.care-visual{height:180px}.halo-one{width:176px;height:176px}.halo-two{width:137px;height:137px}.care-core{width:99px;height:99px;border-radius:28px}.windows-mark{width:45px;height:45px}.care-strip{padding:0 24px 24px;gap:10px}.care-tile{cursor:pointer;min-height:92px;padding:14px;background:rgba(255,255,255,.035);transition:background .2s,border-color .2s}.care-tile:hover{background:rgba(182,137,243,.12);border-color:#a982f4}.care-tile b{font-size:12px}.care-tile small{font-size:10px}.care-tile em{display:none}.care-tile-icon{height:37px;width:37px}.controls{grid-template-columns:minmax(220px,1.5fr) minmax(190px,1fr) minmax(160px,.8fr) auto auto;padding:5px 24px 20px;align-items:end}.controls .field label{font-size:9px}.controls .field select{padding-right:28px}#scan{width:auto;height:44px;min-height:44px;padding:10px 23px;margin:0;flex-direction:row;border-radius:12px;font-size:13px;box-shadow:0 6px 20px rgba(117,71,180,.25)}#cancel{margin:0;min-height:44px}.setup-label{padding:16px 25px 7px}.monitor-card{padding:20px;border-radius:18px;background:#221c2e}.stepper-wrap{margin-top:14px}.step-node{min-width:112px}.monitor-card::before{display:none!important}.monitor-top{gap:12px}.monitor-metrics{flex-wrap:wrap}.metric-box{font-size:10px}.monitor-metrics #profileHint{font-size:10px;max-width:240px}
-.module-banner{display:flex;align-items:center;gap:20px;padding:23px 26px;border:1px solid var(--border);border-radius:18px;background:linear-gradient(110deg,#362747,#252035);margin-bottom:18px}.module-symbol{display:grid;place-items:center;flex:none;width:64px;height:64px;background:linear-gradient(145deg,#a978e0,#55467d);border-radius:20px;font-size:34px;color:#f2e6ff;box-shadow:inset 0 1px rgba(255,255,255,.2)}.module-banner h2{font-size:21px;margin:0 0 4px}.module-banner p{margin:0;color:#bcb1cf;font-size:13px}.module-banner button{margin-left:auto;font-size:11px}.module-empty{min-height:360px;padding:60px 24px;text-align:center;border:1px solid var(--border);border-radius:18px;background:#221c2e}.module-empty h2{font-size:24px;font-weight:650;margin:24px 0 10px}.module-empty p{max-width:420px;margin:0 auto 25px;color:var(--text-muted);font-size:13px}.empty-orbit{width:88px;height:88px;border-radius:28px;display:grid;place-items:center;margin:auto;background:linear-gradient(135deg,#554066,#272238);border:1px solid #715283;font-size:42px;color:#dcb9ff}
-#summary{margin-top:18px}#summary > .grid{grid-template-columns:repeat(3,1fr)}.metric{min-height:95px;border-radius:14px;background:#272132}.metric b{font-family:inherit;font-size:23px}#summary > .panel:last-of-type{display:block;border-radius:18px;background:#211b2b}.tabs{position:static;flex-direction:row;flex-wrap:wrap;max-height:none;padding:12px;border:0;border-bottom:1px solid var(--border);background:rgba(0,0,0,.12);gap:5px}.tabs::before{display:none}.tab{width:auto;min-height:36px;padding:7px 13px}.tab:nth-child(n){margin:0;border-top-color:transparent}.tab.active{box-shadow:none;background:#423051;border-color:#69497e}.tab-count{background:rgba(255,255,255,.06);color:#c4b2d7;margin-left:5px}#view{padding:25px}.decision-number,.depth-meta,.plan-item-path,.plan-explain div,.finding-path-bar,.explain-card{background:#211b2d;border-color:var(--border)}th{background:#30263f;color:#c9bfd8}.bar,.diskbar{background:#393044}.bar i,.diskbar i{background:linear-gradient(90deg,#a781ef,#82cfde)}button{background:#986cdc;box-shadow:none}button:hover:not(:disabled){background:#ae85ea;box-shadow:none}.chart,.brief-main,.brief-next,.depth-card{background:#292133;border-color:var(--border)}
-body[data-page="settings"] .smart-stage,body[data-page="settings"] .care-strip{display:none}body[data-page="settings"] #scanComposer .advanced{padding:22px 26px}body[data-page="settings"] .quick-chips{display:flex}.workspace > #moduleIntro + #scanComposer .advanced{border-top-color:var(--border)}
-@media(max-width:1150px){.controls{grid-template-columns:1fr 1fr}.controls #scan,.controls #cancel{grid-row:auto}.care-strip{grid-template-columns:repeat(3,1fr)}.monitor-status{flex-wrap:wrap}.monitor-top{align-items:flex-start}.module-banner{flex-wrap:wrap}.module-banner button{margin-left:84px}}
-@media(max-width:820px){.hero{position:relative;top:auto;width:auto;display:block;padding:14px}.brand{margin-bottom:14px}.rail-nav{display:flex;flex-direction:row;flex-wrap:wrap;margin:0;gap:5px}.rail-label{display:none}.rail-item{width:auto;min-height:35px;gap:5px;padding:6px 9px;font-size:11px}.rail-item span:last-child{display:inline}.rail-item:nth-of-type(n){display:flex}.badges{display:flex;flex-direction:row;margin-top:9px}.badges .assistant-card,.badges .badge{display:none}.workspace{margin:0;padding:20px 14px}.smart-stage{grid-template-columns:1fr auto;padding:26px;gap:10px}.smart-copy h2{font-size:33px}.smart-copy{text-align:left}.care-visual{width:145px;transform:scale(.8)}.care-strip{grid-template-columns:1fr 1fr}.controls{grid-template-columns:1fr 1fr}.controls .field:first-child{grid-column:1/-1}.controls #scan,.controls #cancel{width:100%;margin:0}.workspace-actions{display:flex}#summary > .grid{grid-template-columns:1fr 1fr}.module-banner button{margin:0}.module-banner p{font-size:12px}#view{padding:18px}}
-@media(max-width:480px){.care-visual{display:none}.smart-stage{grid-template-columns:1fr}.care-tile{grid-template-columns:1fr;gap:8px}.care-tile small{white-space:normal}.controls{grid-template-columns:1fr}.controls .field:first-child{grid-column:auto}.care-strip .care-tile:last-child{grid-column:1/-1;grid-template-columns:37px 1fr}.workspace-kicker{display:none}.workspace-head{height:auto;align-items:center}.workspace-head h1{margin:0}.workspace-actions button{font-size:10px;padding:8px 12px}#summary > .grid{grid-template-columns:1fr}.module-symbol{width:46px;height:46px;border-radius:14px;font-size:26px}.module-banner{padding:18px;gap:12px}.module-banner div{flex:1}.module-banner button{width:100%;justify-content:center}}
-#scanComposer .advanced{margin:0;padding:14px 25px 20px;border-top:1px solid var(--border);background:rgba(0,0,0,.08)}
-#scanComposer .advanced summary{width:auto;font-size:11px}
-#scanComposer .advanced .field textarea{background:#1b1625;border-color:var(--border)}
-
-/* CleanMyMac Desktop Hub Extensions */
-.hub-hero{display:grid;grid-template-columns:auto 1fr auto;gap:20px;align-items:center;padding:24px 28px;border:1px solid var(--border);border-radius:20px;background:linear-gradient(135deg,rgba(169,130,244,.12),rgba(37,32,51,.95));margin-bottom:20px}
-.hub-orb{width:64px;height:64px;border-radius:20px;display:grid;place-items:center;font-size:32px;background:linear-gradient(135deg,#b279f0,#6752a3);color:#fff;box-shadow:0 8px 24px rgba(178,121,240,.3)}
-.hub-hero h2{margin:0 0 4px;font-size:22px;font-weight:750}
-.hub-hero p{margin:0;color:var(--text-muted);font-size:13px;max-width:700px}
-.hub-metrics{display:flex;gap:16px;text-align:right}
-.hub-metric-val{font-size:22px;font-weight:800;color:var(--text);font-variant-numeric:tabular-nums;display:block}
-.hub-metric-lbl{font-size:10px;color:var(--text-muted);text-transform:uppercase;letter-spacing:.08em}
-.hub-card-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:16px;margin:18px 0}
-.hub-card{background:#231c2e;border:1px solid var(--border);border-radius:16px;padding:20px;display:flex;flex-direction:column;justify-content:space-between;gap:12px;transition:all .18s}
-.hub-card:hover{border-color:var(--primary);transform:translateY(-2px);box-shadow:0 8px 26px rgba(0,0,0,.25)}
-.hub-card-head{display:flex;justify-content:space-between;align-items:flex-start;gap:12px}
-.hub-card-title{font-size:15px;font-weight:750;display:flex;align-items:center;gap:8px;color:var(--text)}
-.hub-card-desc{font-size:12px;color:var(--text-muted);line-height:1.45;margin:4px 0}
-.recipe-box{background:#171221;border:1px solid var(--border);border-radius:10px;padding:10px 12px;display:flex;align-items:center;justify-content:space-between;gap:10px;margin-top:6px}
-.recipe-code{font-family:Consolas,monospace;font-size:11.5px;color:#c9bfd8;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:1}
-.perm-list{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}
-.perm-badge{background:rgba(255,255,255,.05);border:1px solid var(--border);padding:3px 9px;border-radius:8px;font-size:11px;color:#d8cde4;display:inline-flex;align-items:center;gap:5px}
-.lens-tree{display:flex;flex-direction:column;gap:8px;margin-top:14px}
-.lens-row{display:grid;grid-template-columns:220px 1fr 100px;align-items:center;gap:14px;background:#231c2e;border:1px solid var(--border);border-radius:12px;padding:12px 16px;cursor:pointer;transition:border-color .15s}
-.lens-row:hover{border-color:var(--primary);background:#2b2238}
-.lens-bar-wrap{height:8px;border-radius:99px;background:#171221;overflow:hidden}
-.lens-bar{height:100%;border-radius:inherit;background:linear-gradient(90deg,#a781ef,#68dce5)}
-.filter-bar{display:flex;gap:8px;flex-wrap:wrap;margin:12px 0 16px;align-items:center}
-.filter-btn{background:#231c2e;border:1px solid var(--border);color:var(--text-muted);padding:6px 14px;border-radius:8px;cursor:pointer;font-size:12px;font-weight:600;transition:all .15s}
-.filter-btn:hover{color:var(--text);border-color:var(--primary)}
-.filter-btn.active{background:#3d2954;border-color:#b279f0;color:#fff}
-.pillar-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin:20px 0}
-.pillar-card{background:linear-gradient(145deg,#261e33,#1d1727);border:1px solid var(--border);border-radius:18px;padding:20px;display:flex;flex-direction:column;gap:12px;cursor:pointer;transition:all .2s}
-.pillar-card:hover{border-color:var(--primary);transform:translateY(-2px);box-shadow:0 10px 30px rgba(0,0,0,.3)}
-.pillar-head{display:flex;justify-content:space-between;align-items:center}
-.pillar-icon{width:42px;height:42px;border-radius:13px;display:grid;place-items:center;font-size:22px;background:rgba(255,255,255,.06)}
-.cleanup-pillar .pillar-icon{background:rgba(110,238,255,.12);color:#6eeeff}
-.protection-pillar .pillar-icon{background:rgba(118,239,190,.12);color:#76efbe}
-.performance-pillar .pillar-icon{background:rgba(255,209,127,.12);color:#ffd17f}
-.applications-pillar .pillar-icon{background:rgba(255,152,200,.12);color:#ff98c8}
-.pillar-title{font-size:16px;font-weight:750;color:var(--text);margin:0}
-.pillar-sub{font-size:12px;color:var(--text-muted);line-height:1.4}
-.pillar-metric{font-size:20px;font-weight:800;color:var(--good);margin-top:auto}
-@media(max-width:1100px){.pillar-grid{grid-template-columns:1fr 1fr}.hub-hero{grid-template-columns:1fr}.hub-metrics{text-align:left}}
-@media(max-width:650px){.pillar-grid{grid-template-columns:1fr}.lens-row{grid-template-columns:1fr;gap:6px}}
-</style>
+<style>__CARE_CSS__</style>
 </head>
 <body>
-<div class="window-chrome" aria-hidden="true">
-  <span class="traffic traffic-red"></span>
-  <span class="traffic traffic-amber"></span>
-  <span class="traffic traffic-green"></span>
-  <span class="window-title"><span class="mini-brand">✦</span> ReconSpace</span>
-  <span class="window-actions"><i>—</i><i>□</i><i>×</i></span>
-</div>
+<!-- Global SVG Gradient Definitions & Symbols -->
+<svg style="position:absolute;width:0;height:0;overflow:hidden;pointer-events:none;" aria-hidden="true" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="cmmGradSmart" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#f43f5e"/>
+      <stop offset="50%" stop-color="#75c6d7"/>
+      <stop offset="100%" stop-color="#38bdf8"/>
+    </linearGradient>
+    <linearGradient id="cmmGradClean" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#00f2fe"/>
+      <stop offset="60%" stop-color="#38bdf8"/>
+      <stop offset="100%" stop-color="#7fc6d5"/>
+    </linearGradient>
+    <linearGradient id="cmmGradProt" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#10b981"/>
+      <stop offset="50%" stop-color="#34d399"/>
+      <stop offset="100%" stop-color="#06b6d4"/>
+    </linearGradient>
+    <linearGradient id="cmmGradPerf" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#fbbf24"/>
+      <stop offset="50%" stop-color="#f97316"/>
+      <stop offset="100%" stop-color="#ef4444"/>
+    </linearGradient>
+    <linearGradient id="cmmGradApps" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#ec4899"/>
+      <stop offset="50%" stop-color="#68bccd"/>
+      <stop offset="100%" stop-color="#7bc8d7"/>
+    </linearGradient>
+    <linearGradient id="cmmGradClutter" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#75c6d7"/>
+      <stop offset="50%" stop-color="#7fc6d5"/>
+      <stop offset="100%" stop-color="#60bed1"/>
+    </linearGradient>
+    <linearGradient id="cmmGradReports" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#06b6d4"/>
+      <stop offset="100%" stop-color="#8b5cf6"/>
+    </linearGradient>
+    <linearGradient id="cmmGradAi" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#9cd8e4"/>
+      <stop offset="50%" stop-color="#38bdf8"/>
+      <stop offset="100%" stop-color="#f472b6"/>
+    </linearGradient>
+    <linearGradient id="cmmGradSettings" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#9badb1"/>
+      <stop offset="100%" stop-color="#cbd5e1"/>
+    </linearGradient>
+    <g id="cmm-ico-smart">
+      <path d="M12 2L14.6 8.4L21 11L14.6 13.6L12 20L9.4 13.6L3 11L9.4 8.4L12 2Z" fill="url(#cmmGradSmart)"/>
+      <circle cx="12" cy="11" r="2.5" fill="#ffffff"/>
+      <circle cx="18" cy="5" r="1.2" fill="#38bdf8"/>
+      <circle cx="6" cy="17" r="1" fill="#f43f5e"/>
+    </g>
+    <g id="cmm-ico-clean">
+      <path d="M15 4l5 5-9.5 9.5a2.5 2.5 0 01-1.77.73H5v-3.73a2.5 2.5 0 01.73-1.77L15 4z" fill="url(#cmmGradClean)"/>
+      <path d="M9 15l2 2" stroke="#ffffff" stroke-width="1.6" stroke-linecap="round"/>
+      <circle cx="19" cy="4" r="1.5" fill="#ffffff"/>
+      <circle cx="7" cy="5" r="1.2" fill="#00f2fe"/>
+      <circle cx="18" cy="14" r="1.2" fill="#38bdf8"/>
+    </g>
+    <g id="cmm-ico-protection">
+      <path d="M12 3l8 3.5v5.5c0 5-3.5 9.5-8 10.5-4.5-1-8-5.5-8-10.5V6.5L12 3z" fill="url(#cmmGradProt)"/>
+      <path d="M9 12l2 2 4-4" stroke="#ffffff" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
+    </g>
+    <g id="cmm-ico-performance">
+      <path d="M14.5 9.5L5 19H3v-2l9.5-9.5" fill="url(#cmmGradPerf)"/>
+      <path d="M13 2.5l4.5 4.5c2 2 2 4.5.5 6.5l-2.5 2.5-5-5 2.5-2.5c2-1.5 4.5-1.5 6.5.5" fill="url(#cmmGradPerf)" opacity="0.9"/>
+      <circle cx="14" cy="7" r="1.6" fill="#ffffff"/>
+      <path d="M3 21l3.5-1-2.5-2.5-1 3.5z" fill="#f59e0b"/>
+    </g>
+    <g id="cmm-ico-applications">
+      <rect x="3" y="3" width="7.5" height="7.5" rx="2.5" fill="url(#cmmGradApps)"/>
+      <rect x="13.5" y="3" width="7.5" height="7.5" rx="2.5" fill="url(#cmmGradApps)" opacity="0.85"/>
+      <rect x="3" y="13.5" width="7.5" height="7.5" rx="2.5" fill="url(#cmmGradApps)" opacity="0.85"/>
+      <rect x="13.5" y="13.5" width="7.5" height="7.5" rx="2.5" fill="url(#cmmGradApps)"/>
+      <circle cx="6.75" cy="6.75" r="1.5" fill="#ffffff"/>
+      <circle cx="17.25" cy="17.25" r="1.5" fill="#ffffff"/>
+    </g>
+    <g id="cmm-ico-clutter">
+      <circle cx="12" cy="12" r="9" stroke="url(#cmmGradClutter)" stroke-width="2" fill="none"/>
+      <circle cx="12" cy="12" r="5.5" stroke="rgba(255,255,255,0.4)" stroke-width="1.5" fill="url(#cmmGradClutter)" fill-opacity="0.3"/>
+      <circle cx="12" cy="12" r="2.5" fill="#ffffff"/>
+      <path d="M12 3v3M12 18v3M3 12h3M18 12h3" stroke="rgba(255,255,255,0.5)" stroke-width="1.5" stroke-linecap="round"/>
+    </g>
+    <g id="cmm-ico-reports">
+      <path d="M6 3h8l5 5v13H6V3z" fill="url(#cmmGradReports)"/>
+      <path d="M14 3v5h5" fill="rgba(255,255,255,0.3)"/>
+      <path d="M9 13h6M9 17h4" stroke="#ffffff" stroke-width="1.6" stroke-linecap="round"/>
+    </g>
+    <g id="cmm-ico-ai">
+      <path d="M12 2l2.5 7.5L22 12l-7.5 2.5L12 22l-2.5-7.5L2 12l7.5-2.5L12 2z" fill="url(#cmmGradAi)"/>
+      <circle cx="12" cy="12" r="3" fill="#ffffff"/>
+    </g>
+    <g id="cmm-ico-settings">
+      <path d="M12 15a3 3 0 100-6 3 3 0 000 6z" fill="#ffffff"/>
+      <path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 11-2.83 2.83l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 11-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 11-2.83-2.83l.06-.06a1.65 1.65 0 00.33-1.82 1.65 1.65 0 00-1.51-1H3a2 2 0 110-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 112.83-2.83l.06.06a1.65 1.65 0 001.82.33H9a1.65 1.65 0 001-1.51V3a2 2 0 114 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 112.83 2.83l-.06.06a1.65 1.65 0 00-.33 1.82V9a1.65 1.65 0 001.51 1H21a2 2 0 110 4h-.09a1.65 1.65 0 00-1.51 1z" fill="url(#cmmGradSettings)"/>
+    </g>
+  </defs>
+</svg>
+
 <div class="wrap">
 
 <header class="hero">
@@ -711,24 +244,26 @@ body[data-page="settings"] .smart-stage,body[data-page="settings"] .care-strip{d
     <h1>
       <span class="logo-icon" aria-hidden="true"></span>
       <span>ReconSpace</span>
-      <span class="version-badge">v__VERSION__ · UI 2026.10.02</span>
+      <span class="version-badge">v__VERSION__</span>
     </h1>
   </div>
   <nav class="rail-nav" aria-label="Main navigation">
+    <span id="railSelection" class="rail-selection" aria-hidden="true"></span>
     <span class="rail-label">Care</span>
-    <button type="button" class="rail-item active" data-page="home"><span class="rail-icon">✦</span><span>Smart Audit</span></button>
-    <button type="button" class="rail-item" data-page="cleanup"><span class="rail-icon">⌁</span><span>Cleanup</span></button>
-    <button type="button" class="rail-item" data-page="protection"><span class="rail-icon">◇</span><span>Protection</span></button>
-    <button type="button" class="rail-item" data-page="performance"><span class="rail-icon">↯</span><span>Performance</span></button>
+    <button type="button" class="rail-item active" data-page="home"><span class="rail-icon"><svg viewBox="0 0 24 24" width="20" height="20"><use href="#cmm-ico-smart"/></svg></span><span>Smart Audit</span></button>
+    <button type="button" class="rail-item" data-page="cleanup"><span class="rail-icon"><svg viewBox="0 0 24 24" width="20" height="20"><use href="#cmm-ico-clean"/></svg></span><span>Cleanup</span></button>
+    <button type="button" class="rail-item" data-page="protection"><span class="rail-icon"><svg viewBox="0 0 24 24" width="20" height="20"><use href="#cmm-ico-protection"/></svg></span><span>Protection</span></button>
+    <button type="button" class="rail-item" data-page="performance"><span class="rail-icon"><svg viewBox="0 0 24 24" width="20" height="20"><use href="#cmm-ico-performance"/></svg></span><span>Performance</span></button>
     <span class="rail-label">Manage</span>
-    <button type="button" class="rail-item" data-page="applications"><span class="rail-icon">▦</span><span>Applications</span></button>
-    <button type="button" class="rail-item" data-page="clutter"><span class="rail-icon">◌</span><span>My Clutter</span></button>
-    <button type="button" class="rail-item" data-page="reports"><span class="rail-icon">▤</span><span>Reports</span></button>
+    <button type="button" class="rail-item" data-page="applications"><span class="rail-icon"><svg viewBox="0 0 24 24" width="20" height="20"><use href="#cmm-ico-applications"/></svg></span><span>Applications</span></button>
+    <button type="button" class="rail-item" data-page="clutter"><span class="rail-icon"><svg viewBox="0 0 24 24" width="20" height="20"><use href="#cmm-ico-clutter"/></svg></span><span>My Clutter</span></button>
+    <button type="button" class="rail-item" data-page="reports"><span class="rail-icon"><svg viewBox="0 0 24 24" width="20" height="20"><use href="#cmm-ico-reports"/></svg></span><span>Reports</span></button>
+    <button type="button" class="rail-item" data-page="ai"><span class="rail-icon"><svg viewBox="0 0 24 24" width="20" height="20"><use href="#cmm-ico-ai"/></svg></span><span>AI Advisor</span></button>
   </nav>
   <div class="badges">
-    <button type="button" class="assistant-card" data-page="reports"><span class="assistant-orb">✦</span><span><b>Review your PC</b><small>Evidence &amp; action plan</small></span><span class="assistant-arrow">›</span></button>
+    <button type="button" class="assistant-card" data-page="ai" title="Open AI Audit Advisor"><span class="assistant-orb" style="background:linear-gradient(135deg,#9cd8e4,#38bdf8)"><svg viewBox="0 0 24 24" width="18" height="18"><use href="#cmm-ico-ai"/></svg></span><span><b>✦ AI Advisor</b><small id="topAiSub">Intelligent system review</small></span><span style="font-size:18px;color:var(--text-dim)">›</span></button>
     <span class="badge">● READ-ONLY ENGINE</span>
-    <button type="button" class="rail-item" data-page="settings"><span class="rail-icon">⚙</span><span>Scan settings</span></button>
+    <button type="button" class="rail-item" data-page="settings"><span class="rail-icon"><svg viewBox="0 0 24 24" width="18" height="18"><use href="#cmm-ico-settings"/></svg></span><span>Scan settings</span></button>
   </div>
 </header>
 
@@ -738,29 +273,57 @@ body[data-page="settings"] .smart-stage,body[data-page="settings"] .care-strip{d
     <span class="workspace-kicker">Windows care, made clear</span>
     <h1 id="pageTitle">Smart Audit</h1>
   </div>
-  <div class="workspace-actions"><button type="button" class="secondary" data-page="settings">Scan settings</button></div>
+  <div class="workspace-actions"><label class="motion-choice" for="motionPreference">Motion<select id="motionPreference" onchange="CareMotion.setPreference(this.value)"><option value="system">System</option><option value="full">Full</option><option value="reduced">Reduced</option></select></label><button class="secondary zoom-control" type="button" aria-label="Zoom out" onclick="setZoom(-.05)">−</button><button class="secondary zoom-readout" id="zoomReadout" type="button" aria-label="Reset zoom" onclick="setZoom(0)">100%</button><button class="secondary zoom-control" type="button" aria-label="Zoom in" onclick="setZoom(.05)">+</button><button type="button" class="secondary" data-page="settings">Scan settings</button></div>
 </div>
 
 <div id="moduleIntro" class="hidden"></div>
 <div class="panel" id="scanComposer">
   <div class="smart-stage">
     <div class="smart-copy">
-      <span class="smart-eyebrow">One scan. The full picture.</span>
-      <h2>Give your PC<br><span>a fresh start.</span></h2>
-      <p>ReconSpace checks storage, safety, performance, applications, and clutter in one thoughtful pass.</p>
+      <span class="smart-eyebrow">A little care goes a long way</span>
+      <h2>Your PC.<br><span class="cmm-aurora-text">A clearer picture.</span></h2>
+      <p>Discover what takes up space, understand your system, and review what deserves a closer look.</p><div class="intro-features"><button class="intro-feature" onclick="navigatePage('cleanup')"><span>◷</span><span>Understand your storage</span></button><button class="intro-feature" onclick="navigatePage('performance')"><span>↗</span><span>Explore your system activity</span></button><button class="intro-feature" onclick="navigatePage('protection')"><span>◇</span><span>Review trust and protection</span></button></div>
     </div>
-    <div class="care-visual" aria-hidden="true">
-      <div class="halo halo-one"></div><div class="halo halo-two"></div>
-      <div class="care-core"><span class="windows-mark"><i></i><i></i><i></i><i></i></span></div>
-      <span class="spark spark-a">✦</span><span class="spark spark-b">✧</span><span class="spark spark-c">•</span>
+    <div class="care-visual" data-parallax aria-hidden="true">
+      <span class="scene-halo"></span><span class="scene-ring ring-one"></span><span class="scene-ring ring-two"></span>
+      <div class="parallax-object"><img class="desktop-art" src="/assets/care-desktop.png" alt="" fetchpriority="high" width="400" height="350"></div>
     </div>
   </div>
+  <div id="welcomeActions" class="welcome-actions">
+    <button type="button" class="scope-choice" onclick="navigatePage('settings')"><span id="scopeSummary">C:\ · Deep audit</span><span>Change scope ›</span></button>
+    <p class="welcome-note">An audit only. Your files stay exactly where they are.</p>
+  </div>
   <div class="care-strip" aria-label="Smart Audit coverage">
-    <div class="care-tile cleanup"><span class="care-tile-icon">⌁</span><span><b>Cleanup</b><small>Files &amp; storage</small></span><em>Ready</em></div>
-    <div class="care-tile protection"><span class="care-tile-icon">◇</span><span><b>Protection</b><small>Trust &amp; security</small></span><em>Ready</em></div>
-    <div class="care-tile performance"><span class="care-tile-icon">↯</span><span><b>Performance</b><small>Processes &amp; startup</small></span><em>Ready</em></div>
-    <div class="care-tile applications"><span class="care-tile-icon">▦</span><span><b>Applications</b><small>Installed software</small></span><em>Ready</em></div>
-    <div class="care-tile clutter"><span class="care-tile-icon">◌</span><span><b>My Clutter</b><small>Large &amp; duplicate files</small></span><em>Ready</em></div>
+    <div class="care-tile cleanup" tabindex="0" role="button" onclick="navigatePage('cleanup')">
+      <span class="care-tile-icon"><svg viewBox="0 0 24 24" width="24" height="24"><use href="#cmm-ico-clean"/></svg></span>
+      <div><b>Cleanup</b><small>Files &amp; storage</small></div>
+      <span class="care-tile-status">Ready</span>
+    </div>
+    <div class="care-tile protection" tabindex="0" role="button" onclick="navigatePage('protection')">
+      <span class="care-tile-icon"><svg viewBox="0 0 24 24" width="24" height="24"><use href="#cmm-ico-protection"/></svg></span>
+      <div><b>Protection</b><small>Trust &amp; security</small></div>
+      <span class="care-tile-status">Ready</span>
+    </div>
+    <div class="care-tile performance" tabindex="0" role="button" onclick="navigatePage('performance')">
+      <span class="care-tile-icon"><svg viewBox="0 0 24 24" width="24" height="24"><use href="#cmm-ico-performance"/></svg></span>
+      <div><b>Performance</b><small>Processes &amp; startup</small></div>
+      <span class="care-tile-status">Ready</span>
+    </div>
+    <div class="care-tile applications" tabindex="0" role="button" onclick="navigatePage('applications')">
+      <span class="care-tile-icon"><svg viewBox="0 0 24 24" width="24" height="24"><use href="#cmm-ico-applications"/></svg></span>
+      <div><b>Applications</b><small>Installed software</small></div>
+      <span class="care-tile-status">Ready</span>
+    </div>
+    <div class="care-tile clutter" tabindex="0" role="button" onclick="navigatePage('clutter')">
+      <span class="care-tile-icon"><svg viewBox="0 0 24 24" width="24" height="24"><use href="#cmm-ico-clutter"/></svg></span>
+      <div><b>My Clutter</b><small>Large &amp; duplicate files</small></div>
+      <span class="care-tile-status">Ready</span>
+    </div>
+    <div class="care-tile ai" tabindex="0" role="button" onclick="navigatePage('ai')" title="Open AI Audit Advisor">
+      <span class="care-tile-icon"><svg viewBox="0 0 24 24" width="24" height="24"><use href="#cmm-ico-ai"/></svg></span>
+      <div><b>AI Advisor</b><small>Intelligent review</small></div>
+      <span class="care-tile-status" id="homeAiStatus">Ready</span>
+    </div>
   </div>
   <div class="setup-label"><span>Choose what to scan</span><span>Everything stays on this PC</span></div>
   <div class="controls">
@@ -768,11 +331,11 @@ body[data-page="settings"] .smart-stage,body[data-page="settings"] .care-strip{d
       <label for="root">Scan root</label>
       <input id="root" type="text" value="C:\" spellcheck="false" autocomplete="off" aria-describedby="rootHelp" />
       <div class="quick-chips">
-        <span class="chip" onclick="setRoot('C:\\')">C:\</span>
-        <span class="chip" onclick="setRoot('D:\\')">D:\</span>
-        <span class="chip" onclick="setRoot('%USERPROFILE%')">%USERPROFILE%</span>
-        <span class="chip" onclick="setRoot('%LOCALAPPDATA%')">%LOCALAPPDATA%</span>
-        <span class="chip" onclick="setRoot('%PROGRAMDATA%')">%PROGRAMDATA%</span>
+        <button type="button" class="chip" onclick="setRoot('C:\\')">C:\</button>
+        <button type="button" class="chip" onclick="setRoot('D:\\')">D:\</button>
+        <button type="button" class="chip" onclick="setRoot('%USERPROFILE%')">%USERPROFILE%</button>
+        <button type="button" class="chip" onclick="setRoot('%LOCALAPPDATA%')">%LOCALAPPDATA%</button>
+        <button type="button" class="chip" onclick="setRoot('%PROGRAMDATA%')">%PROGRAMDATA%</button>
       </div>
       <div id="rootHelp" class="small" style="margin-top:4px">Local drive or directory to inspect.</div>
     </div>
@@ -797,8 +360,15 @@ body[data-page="settings"] .smart-stage,body[data-page="settings"] .care-strip{d
         <option value="1024">1 GB</option>
       </select>
     </div>
-    <button id="scan" type="button"><span class="scan-play">▶</span><span>Scan</span></button>
+    <div id="scanSlot"><button id="scan" type="button"><span class="scan-play">▶</span><span>Scan</span></button></div>
     <button id="cancel" type="button" class="dangerish" disabled>Cancel scan</button>
+    <div class="ai-strip" style="grid-column:1/-1;display:flex;align-items:center;justify-content:space-between;padding:10px 14px;background:rgba(44,131,148,0.12);border:1px solid rgba(44,131,148,0.3);border-radius:12px;margin-top:4px">
+      <label style="display:flex;align-items:center;gap:10px;cursor:pointer;font-size:12px">
+        <input type="checkbox" id="autoAiReview" checked>
+        <span><b>✦ Auto-Generate AI Audit Review</b> upon scan completion (offline heuristic or configured cloud LLM)</span>
+      </label>
+      <button type="button" class="secondary" style="font-size:11px;padding:3px 10px" onclick="navigatePage('ai')">Configure AI</button>
+    </div>
   </div>
 
   <details class="advanced">
@@ -820,7 +390,7 @@ body[data-page="settings"] .smart-stage,body[data-page="settings"] .care-strip{d
       <textarea id="rulePacks" spellcheck="false" placeholder="Optional metadata-only rule packs"></textarea>
       <div class="small">Rule packs are validated JSON match rules. They cannot execute code or commands.</div>
     </div>
-    <div style="display:flex;gap:18px;flex-wrap:wrap;margin-top:12px;color:var(--muted);font-size:12px">
+    <div style="display:flex;gap:18px;flex-wrap:wrap;margin-top:12px;color:var(--text-muted);font-size:12px">
       <label><input id="statefulHash" type="checkbox" style="width:auto;margin-right:7px">Hash VM/forensic/dump files for duplicates</label>
       <label><input id="signatureHashes" type="checkbox" style="width:auto;margin-right:7px">SHA-256 selected persistence binaries</label>
       <label><input id="noSignatures" type="checkbox" style="width:auto;margin-right:7px">Skip Authenticode evidence</label>
@@ -833,6 +403,7 @@ body[data-page="settings"] .smart-stage,body[data-page="settings"] .care-strip{d
 
 <!-- Live Audit Execution Monitor (Always Visible & Informative) -->
 <div class="monitor-card" id="liveMonitor">
+  <div class="scan-spotlight"><div class="scan-orbit"><div class="scan-orbit-ring"></div><span id="scanOrbitIcon"></span></div><span class="smart-eyebrow">Getting to know your PC</span><h2 id="scanHeadline">A little care, in progress.</h2><p id="scanPhase">Preparing your audit…</p><button id="cancelSpotlight" type="button" class="secondary" disabled onclick="document.querySelector('#cancel').click()">Stop audit</button></div>
   <div class="monitor-top">
     <div class="monitor-status">
       <span id="statusPill" class="status-pill idle">
@@ -926,11 +497,12 @@ body[data-page="settings"] .smart-stage,body[data-page="settings"] .care-strip{d
 </div>
 
 <div id="error" class="panel notice error hidden" role="alert"></div>
+<section id="careResults" class="hidden" aria-label="Audit overview"></section>
 
 <div id="summary" class="hidden">
   <div class="grid" id="metrics"></div>
 
-  <div class="panel" style="margin-top:14px">
+  <div class="panel result-toolbar" style="margin-top:14px">
     <div style="display:flex;justify-content:space-between;gap:12px;align-items:center;flex-wrap:wrap">
       <div>
         <b style="font-size:16px">Audit Results &amp; Intelligence</b>
@@ -952,6 +524,7 @@ body[data-page="settings"] .smart-stage,body[data-page="settings"] .care-strip{d
       <button type="button" class="tab" role="tab" aria-selected="false" data-view="applications_hub">Applications Hub</button>
       <button type="button" class="tab" role="tab" aria-selected="false" data-view="clutter_hub">My Clutter Hub</button>
       <button type="button" class="tab" role="tab" aria-selected="false" data-view="plan">Action plan <span class="tab-count" id="count-plan">0</span></button>
+      <button type="button" class="tab" role="tab" aria-selected="false" data-view="ai_review">✦ AI Advisor</button>
       <button type="button" class="tab" role="tab" aria-selected="false" data-view="findings">Findings <span class="tab-count" id="count-findings">0</span></button>
       <button type="button" class="tab" role="tab" aria-selected="false" data-view="dirs">Folders <span class="tab-count" id="count-dirs">0</span></button>
       <button type="button" class="tab" role="tab" aria-selected="false" data-view="files">Files <span class="tab-count" id="count-files">0</span></button>
@@ -979,25 +552,117 @@ body[data-page="settings"] .smart-stage,body[data-page="settings"] .care-strip{d
 
 <script>
 const PROFILE_DEFAULTS=__PROFILES__;
-const token=new URLSearchParams(location.search).get('token')||'';
-if(token)history.replaceState(null,'',location.pathname);
+__CARE_MOTION__
+__SPACE_LENS__
+const token=(()=>{const supplied=new URLSearchParams(location.search).get('token')||'';try{if(supplied)sessionStorage.setItem('rs_session',supplied);return supplied||sessionStorage.getItem('rs_session')||'';}catch{return supplied;}})();
+if(token)history.replaceState(null,'',location.pathname+location.hash);
 let REPORT=null,currentView='overview',previousReport=null,pollFailures=0;
 let currentPage='home';
+
+let iconSerial=0;
+function cmmIcon(name, size=20, extraClass=''){
+  const id='care-icon-'+(++iconSerial);
+  const colors={smart:['#ffe6cf','#b7dae1'],clean:['#ffd4bb','#e599aa'],cleanup:['#ffd4bb','#e599aa'],protection:['#bce8e3','#70aaa7'],performance:['#fff0be','#e5b579'],applications:['#dcf2f6','#9ebdc3'],clutter:['#d8edf1','#9ac1c9'],reports:['#c9e4fc','#94b5bb'],ai:['#dbeef2','#a1c2c9'],settings:['#d9e4e6','#98a9ac']};
+  const [light,dark]=colors[name]||colors.smart;
+  const shapes={smart:'<path d="M32 12l5.5 14.5L52 32l-14.5 5.5L32 52l-5.5-14.5L12 32l14.5-5.5z"/>',clean:'<path d="M13 30a19 19 0 1030-14L32 32z"/><path d="M34 12v16h17A18 18 0 0034 12z"/>',protection:'<path d="M32 10c7 5 12 6 19 7v16c0 12-9 18-19 22C22 51 13 45 13 33V17c7-1 12-2 19-7z"/><path d="M23 32l7 7 12-15" fill="none" stroke="#fff" stroke-width="3"/>',performance:'<path d="M37 9L16 36h14l-3 20 23-30H35z"/>',applications:'<rect x="12" y="12" width="17" height="17" rx="5"/><rect x="35" y="12" width="17" height="17" rx="5"/><rect x="12" y="35" width="17" height="17" rx="5"/><rect x="35" y="35" width="17" height="17" rx="5"/>',clutter:'<path d="M11 18h17l5 6h21v25a5 5 0 01-5 5H16a5 5 0 01-5-5z"/><path d="M15 13h15l5 6h15" fill="none" stroke-width="4"/>',reports:'<rect x="13" y="33" width="9" height="19" rx="3"/><rect x="28" y="23" width="9" height="29" rx="3"/><rect x="43" y="12" width="9" height="40" rx="3"/>',ai:'<path d="M32 10l7 15 15 7-15 7-7 15-7-15-15-7 15-7z"/><circle cx="32" cy="32" r="5" fill="#fff"/>',settings:'<path d="M27 11h10l2 7 7 4 7-1 5 9-5 5v8l-5 9-7-2-7 4-2 6H22l-2-7-7-4-7 1-5-9 5-5v-8l5-9 7 2 7-4z" transform="translate(4 -4) scale(.9)"/><circle cx="32" cy="32" r="8" fill="#4d585a"/>'};
+  return `<svg class="cmm-icon ${extraClass}" viewBox="0 0 64 64" width="${size}" height="${size}" aria-hidden="true"><defs><linearGradient id="${id}" x2=".8" y2="1"><stop stop-color="${light}"/><stop offset="1" stop-color="${dark}"/></linearGradient></defs><g fill="url(#${id})" stroke="${light}" stroke-width="1.1" stroke-linejoin="round">${shapes[name==='cleanup'?'clean':name]||shapes.smart}</g></svg>`;
+}
+
 const PAGES={
- home:{title:'Smart Audit',icon:'✦',description:'A clear picture of your PC, in one scan.',views:['overview','plan','health']},
- cleanup:{title:'Cleanup',icon:'⌁',description:'Find storage candidates and understand what can be reviewed for cleanup.',views:['cleanup_hub','findings','dirs','files','tooling']},
- protection:{title:'Protection',icon:'◇',description:'Inspect publisher signatures, permissions, and persistence evidence.',views:['protection_hub','trust','permissions','startup','services','tasks']},
- performance:{title:'Performance',icon:'↯',description:'See running processes and what starts with Windows.',views:['performance_hub','processes','startup','services','tasks']},
- applications:{title:'Applications',icon:'▦',description:'Explore installed software and the files associated with each application.',views:['applications_hub','apps','ownership']},
- clutter:{title:'My Clutter',icon:'◌',description:'Review exact duplicates, large files, and folders taking up space.',views:['clutter_hub','duplicates','files','dirs']},
- reports:{title:'Reports',icon:'▤',description:'Review recommendations, inspect coverage, compare reports, and export your evidence.',views:['plan','health','system','compare','notes','overview']},
- settings:{title:'Scan settings',icon:'⚙',description:'Choose a scan root, depth, exclusions, and evidence options.',views:[]}
+ home:{title:'Smart Audit',icon:cmmIcon('smart',24),description:'A clear picture of your PC, in one scan.',views:['overview','ai_review','plan','health']},
+ cleanup:{title:'Cleanup',icon:cmmIcon('clean',24),description:'Find storage candidates and understand what can be reviewed for cleanup.',views:['cleanup_hub','findings','dirs','files','tooling']},
+ protection:{title:'Protection',icon:cmmIcon('protection',24),description:'Inspect publisher signatures, permissions, and persistence evidence.',views:['protection_hub','trust','permissions','startup','services','tasks']},
+ performance:{title:'Performance',icon:cmmIcon('performance',24),description:'See running processes and what starts with Windows.',views:['performance_hub','processes','startup','services','tasks']},
+ applications:{title:'Applications',icon:cmmIcon('applications',24),description:'Explore installed software and the files associated with each application.',views:['applications_hub','apps','ownership']},
+ clutter:{title:'My Clutter',icon:cmmIcon('clutter',24),description:'Review exact duplicates, large files, and folders taking up space.',views:['clutter_hub','duplicates','files','dirs']},
+ reports:{title:'Reports',icon:cmmIcon('reports',24),description:'Review recommendations, inspect coverage, compare reports, and export your evidence.',views:['plan','ai_review','health','system','compare','notes','overview']},
+ ai:{title:'AI Advisor',icon:cmmIcon('ai',24),description:'AI-assisted audit review with intelligent triage, safety warnings, and copyable PowerShell recipes.',views:['ai_review']},
+ settings:{title:'Scan settings',icon:cmmIcon('settings',24),description:'Choose a scan root, depth, exclusions, and evidence options.',views:[]}
 };
+
 function getPreScanHub(name){
-  if(name==='cleanup'){
-    return `<div style="margin-top:20px">
+  if(name==='ai'){
+    let savedKey = localStorage.getItem('rs_ai_key') || '';
+    let savedProvider = localStorage.getItem('rs_ai_provider') || 'heuristic';
+    let savedModel = localStorage.getItem('rs_ai_model') || '';
+    let savedEndpoint = localStorage.getItem('rs_ai_endpoint') || '';
+
+    return `<div style="margin-top:20px" class="zoom-stage">
       <div class="hub-hero">
-        <div class="hub-orb">⌁</div>
+        <div class="hub-orb" style="background:linear-gradient(135deg,#2c8394,#65bbcc)">✦</div>
+        <div>
+          <h2>AI Audit Advisor</h2>
+          <p>Triage Windows telemetry with an intelligent AI systems analyst. Supports OpenAI-compatible endpoints, Anthropic Claude, Google Gemini, Ollama (local LLM), and built-in offline heuristics.</p>
+        </div>
+      </div>
+
+      <!-- Configuration Card (available before and after scan) -->
+      <div class="panel" style="margin-top:20px;padding:20px">
+        <h3 style="margin-top:0;font-size:16px;font-weight:750">AI Advisor Configuration &amp; Setup</h3>
+        <p class="small" style="margin-bottom:12px">Configure your AI engine below. Settings persist locally in your browser with zero background network pingbacks.</p>
+        <div class="grid" style="grid-template-columns:repeat(auto-fit, minmax(220px, 1fr));gap:14px;margin-top:14px">
+          <div>
+            <label style="display:block;font-size:12px;font-weight:600;margin-bottom:4px">AI Engine / Provider</label>
+            <select id="aiProviderSelectPre" style="width:100%;padding:7px;border-radius:6px;background:var(--card);color:var(--fg);border:1px solid var(--border)" onchange="onAIProviderChange(this.value);localStorage.setItem('rs_ai_provider',this.value)">
+              <option value="heuristic" ${savedProvider==='heuristic'?'selected':''}>Offline Heuristic Engine (No Key Required)</option>
+              <option value="openai" ${savedProvider==='openai'?'selected':''}>OpenAI / OpenRouter / Groq</option>
+              <option value="anthropic" ${savedProvider==='anthropic'?'selected':''}>Anthropic Claude</option>
+              <option value="gemini" ${savedProvider==='gemini'?'selected':''}>Google Gemini</option>
+              <option value="ollama" ${savedProvider==='ollama'?'selected':''}>Ollama (Local LLM)</option>
+            </select>
+          </div>
+          <div id="aiKeyBoxPre" style="${savedProvider==='heuristic'||savedProvider==='ollama'?'display:none':''}">
+            <label style="display:block;font-size:12px;font-weight:600;margin-bottom:4px">API Key (Saved locally)</label>
+            <input type="password" id="aiApiKeyInputPre" value="${esc(savedKey)}" placeholder="sk-..." style="width:100%;padding:7px;border-radius:6px;background:var(--card);color:var(--fg);border:1px solid var(--border)" onchange="localStorage.setItem('rs_ai_key', this.value.trim())">
+          </div>
+          <div id="aiModelBoxPre">
+            <label style="display:block;font-size:12px;font-weight:600;margin-bottom:4px">Model Override (Optional)</label>
+            <input type="text" id="aiModelInputPre" value="${esc(savedModel)}" placeholder="Default for provider" style="width:100%;padding:7px;border-radius:6px;background:var(--card);color:var(--fg);border:1px solid var(--border)" onchange="localStorage.setItem('rs_ai_model', this.value.trim())">
+          </div>
+          <div id="aiEndpointBoxPre" style="${savedProvider==='heuristic'?'display:none':''}">
+            <label style="display:block;font-size:12px;font-weight:600;margin-bottom:4px">Custom Endpoint (Optional)</label>
+            <input type="text" id="aiEndpointInputPre" value="${esc(savedEndpoint)}" placeholder="Default provider API URL" style="width:100%;padding:7px;border-radius:6px;background:var(--card);color:var(--fg);border:1px solid var(--border)" onchange="localStorage.setItem('rs_ai_endpoint', this.value.trim())">
+          </div>
+        </div>
+
+        <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px;margin-top:16px;padding-top:14px;border-top:1px solid var(--border)">
+          <label style="display:flex;align-items:center;gap:8px;font-size:12px;cursor:pointer">
+            <input type="checkbox" id="aiRedactTogglePre" checked>
+            <span><b>Privacy Guard:</b> Sanitize usernames, hostnames, paths, and secrets before prompting</span>
+          </label>
+          <div style="display:flex;gap:10px;flex-wrap:wrap">
+            <button type="button" class="secondary" onclick="copySanitizedPrompt(this)">📋 Preview Prompt Format</button>
+            <label class="button secondary" style="cursor:pointer;margin:0;padding:6px 12px;border-radius:8px;font-size:13px;display:inline-flex;align-items:center">
+              📂 Load Saved Report (.json)
+              <input type="file" accept=".json,application/json" style="display:none" onchange="handleReportImport(event)">
+            </label>
+            <button type="button" class="primary" style="background:linear-gradient(135deg,#2c8394,#65bbcc);border:none" onclick="startAuditWithAI()">
+              ✦ Start Full Audit with AI Review
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <div class="hub-card-grid" style="margin-top:16px">
+        <div class="hub-card">
+          <div class="hub-card-head"><div class="hub-card-title"><svg viewBox="0 0 24 24" width="20" height="20" style="margin-right:6px"><use href="#cmm-ico-protection"/></svg> Privacy-First Redaction</div></div>
+          <div class="hub-card-desc">Usernames, hostnames, paths, and secret tokens are automatically sanitized before prompting.</div>
+        </div>
+        <div class="hub-card">
+          <div class="hub-card-head"><div class="hub-card-title"><svg viewBox="0 0 24 24" width="20" height="20" style="margin-right:6px"><use href="#cmm-ico-performance"/></svg> Structured Recommendations</div></div>
+          <div class="hub-card-desc">Classified into Critical Actions, Quick Wins, Safety Warnings (never touch dev workspaces), and Architecture Explainers.</div>
+        </div>
+        <div class="hub-card">
+          <div class="hub-card-head"><div class="hub-card-title"><svg viewBox="0 0 24 24" width="20" height="20" style="margin-right:6px"><use href="#cmm-ico-clean"/></svg> Copyable PowerShell Recipes</div></div>
+          <div class="hub-card-desc">Every action includes standard Microsoft PowerShell commands ready for 1-click clipboard copy.</div>
+        </div>
+      </div>
+    </div>`;
+  }
+  if(name==='cleanup'){
+    return `<div style="margin-top:20px" class="zoom-stage">
+      <div class="hub-hero">
+        <div class="hub-orb" style="background:linear-gradient(135deg,#00f2fe,#4facfe)"><svg viewBox="0 0 24 24" width="34" height="34"><use href="#cmm-ico-clean"/></svg></div>
         <div>
           <h2>System &amp; Application Cleanup</h2>
           <p>Scan caches, package managers, development artifacts, and disposable files safely with zero destructive deletes.</p>
@@ -1005,24 +670,24 @@ function getPreScanHub(name){
       </div>
       <div class="hub-card-grid">
         <div class="hub-card">
-          <div class="hub-card-head"><div class="hub-card-title">🗂 System Cache &amp; Temp</div></div>
+          <div class="hub-card-head"><div class="hub-card-title"><svg viewBox="0 0 24 24" width="20" height="20" style="margin-right:6px"><use href="#cmm-ico-clean"/></svg> System Cache &amp; Temp</div></div>
           <div class="hub-card-desc">Audit Windows temp, Delivery Optimization, crash dumps, and SoftwareDistribution downloads.</div>
         </div>
         <div class="hub-card">
-          <div class="hub-card-head"><div class="hub-card-title">🌐 Browser &amp; App Data</div></div>
+          <div class="hub-card-head"><div class="hub-card-title"><svg viewBox="0 0 24 24" width="20" height="20" style="margin-right:6px"><use href="#cmm-ico-clean"/></svg> Browser &amp; App Data</div></div>
           <div class="hub-card-desc">Inspect Chrome, Edge, Brave, and Firefox cache directories and profile footprints.</div>
         </div>
         <div class="hub-card">
-          <div class="hub-card-head"><div class="hub-card-title">📦 Developer &amp; Build Caches</div></div>
+          <div class="hub-card-head"><div class="hub-card-title"><svg viewBox="0 0 24 24" width="20" height="20" style="margin-right:6px"><use href="#cmm-ico-performance"/></svg> Developer &amp; Build Caches</div></div>
           <div class="hub-card-desc">Identify node_modules, Python venvs, pip/npm/cargo caches, and Docker artifacts.</div>
         </div>
       </div>
     </div>`;
   }
   if(name==='protection'){
-    return `<div style="margin-top:20px">
+    return `<div style="margin-top:20px" class="zoom-stage">
       <div class="hub-hero">
-        <div class="hub-orb" style="background:linear-gradient(135deg,#5dd39e,#348aa7)">◇</div>
+        <div class="hub-orb" style="background:linear-gradient(135deg,#10b981,#06b6d4)"><svg viewBox="0 0 24 24" width="34" height="34"><use href="#cmm-ico-protection"/></svg></div>
         <div>
           <h2>Windows Security &amp; Privacy Health</h2>
           <p>Audit Microsoft Defender status, background app hardware permissions (webcam, mic, location), and unsigned binaries.</p>
@@ -1030,24 +695,24 @@ function getPreScanHub(name){
       </div>
       <div class="hub-card-grid">
         <div class="hub-card">
-          <div class="hub-card-head"><div class="hub-card-title">🛡 Microsoft Defender Audit</div></div>
+          <div class="hub-card-head"><div class="hub-card-title"><svg viewBox="0 0 24 24" width="20" height="20" style="margin-right:6px"><use href="#cmm-ico-protection"/></svg> Microsoft Defender Audit</div></div>
           <div class="hub-card-desc">Inspect real-time protection, signature definition age, and threat detection history.</div>
         </div>
         <div class="hub-card">
-          <div class="hub-card-head"><div class="hub-card-title">🎙 Privacy &amp; ConsentStore</div></div>
+          <div class="hub-card-head"><div class="hub-card-title"><svg viewBox="0 0 24 24" width="20" height="20" style="margin-right:6px"><use href="#cmm-ico-protection"/></svg> Privacy &amp; ConsentStore</div></div>
           <div class="hub-card-desc">Audit Windows CapabilityAccessManager consent permissions for webcam, microphone, and location.</div>
         </div>
         <div class="hub-card">
-          <div class="hub-card-head"><div class="hub-card-title">🔐 Publisher Trust Verification</div></div>
+          <div class="hub-card-head"><div class="hub-card-title"><svg viewBox="0 0 24 24" width="20" height="20" style="margin-right:6px"><use href="#cmm-ico-protection"/></svg> Publisher Trust Verification</div></div>
           <div class="hub-card-desc">Verify Authenticode digital signatures on active binaries and detect unsigned execution.</div>
         </div>
       </div>
     </div>`;
   }
   if(name==='performance'){
-    return `<div style="margin-top:20px">
+    return `<div style="margin-top:20px" class="zoom-stage">
       <div class="hub-hero">
-        <div class="hub-orb" style="background:linear-gradient(135deg,#ffd166,#ef476f)">↯</div>
+        <div class="hub-orb" style="background:linear-gradient(135deg,#fbbf24,#ef4444)"><svg viewBox="0 0 24 24" width="34" height="34"><use href="#cmm-ico-performance"/></svg></div>
         <div>
           <h2>System Performance &amp; Memory Audit</h2>
           <p>Audit RAM load, working sets of active processes, startup persistence overhead, and system maintenance tasks.</p>
@@ -1055,24 +720,24 @@ function getPreScanHub(name){
       </div>
       <div class="hub-card-grid">
         <div class="hub-card">
-          <div class="hub-card-head"><div class="hub-card-title">⚡ RAM &amp; Memory Distribution</div></div>
+          <div class="hub-card-head"><div class="hub-card-title"><svg viewBox="0 0 24 24" width="20" height="20" style="margin-right:6px"><use href="#cmm-ico-performance"/></svg> RAM &amp; Memory Distribution</div></div>
           <div class="hub-card-desc">Physical and virtual memory breakdown with working set analysis for resource-heavy apps.</div>
         </div>
         <div class="hub-card">
-          <div class="hub-card-head"><div class="hub-card-title">🚀 Startup &amp; Persistence Impact</div></div>
+          <div class="hub-card-head"><div class="hub-card-title"><svg viewBox="0 0 24 24" width="20" height="20" style="margin-right:6px"><use href="#cmm-ico-performance"/></svg> Startup &amp; Persistence Impact</div></div>
           <div class="hub-card-desc">Inspect Startup registry entries, scheduled tasks, and background services delaying boot.</div>
         </div>
         <div class="hub-card">
-          <div class="hub-card-head"><div class="hub-card-title">🛠 Maintenance Quick-Fixes</div></div>
+          <div class="hub-card-head"><div class="hub-card-title"><svg viewBox="0 0 24 24" width="20" height="20" style="margin-right:6px"><use href="#cmm-ico-performance"/></svg> Maintenance Quick-Fixes</div></div>
           <div class="hub-card-desc">Copy-paste PowerShell recipes for DNS flush, DISM component store cleanup, and SSD TRIM.</div>
         </div>
       </div>
     </div>`;
   }
   if(name==='applications'){
-    return `<div style="margin-top:20px">
+    return `<div style="margin-top:20px" class="zoom-stage">
       <div class="hub-hero">
-        <div class="hub-orb" style="background:linear-gradient(135deg,#ff70a6,#70d6ff)">▦</div>
+        <div class="hub-orb" style="background:linear-gradient(135deg,#ec4899,#7bc8d7)"><svg viewBox="0 0 24 24" width="34" height="34"><use href="#cmm-ico-applications"/></svg></div>
         <div>
           <h2>Installed Applications &amp; Leftovers</h2>
           <p>Track installed software footprints, quiet uninstall commands, and orphaned AppData leftover folders.</p>
@@ -1080,24 +745,24 @@ function getPreScanHub(name){
       </div>
       <div class="hub-card-grid">
         <div class="hub-card">
-          <div class="hub-card-head"><div class="hub-card-title">🔍 Installed App Footprints</div></div>
+          <div class="hub-card-head"><div class="hub-card-title"><svg viewBox="0 0 24 24" width="20" height="20" style="margin-right:6px"><use href="#cmm-ico-applications"/></svg> Installed App Footprints</div></div>
           <div class="hub-card-desc">Detect installed applications from 64-bit and 32-bit registry, correlating files and background services.</div>
         </div>
         <div class="hub-card">
-          <div class="hub-card-head"><div class="hub-card-title">🧹 Orphaned AppData Leftovers</div></div>
+          <div class="hub-card-head"><div class="hub-card-title"><svg viewBox="0 0 24 24" width="20" height="20" style="margin-right:6px"><use href="#cmm-ico-applications"/></svg> Orphaned AppData Leftovers</div></div>
           <div class="hub-card-desc">Discover remnant directories in %LocalAppData% and %AppData% left behind after uninstalls.</div>
         </div>
         <div class="hub-card">
-          <div class="hub-card-head"><div class="hub-card-title">⚡ Silent Uninstaller Audit</div></div>
+          <div class="hub-card-head"><div class="hub-card-title"><svg viewBox="0 0 24 24" width="20" height="20" style="margin-right:6px"><use href="#cmm-ico-applications"/></svg> Silent Uninstaller Audit</div></div>
           <div class="hub-card-desc">Inspect QuietUninstallString and standard uninstaller commands with copyable command line recipes.</div>
         </div>
       </div>
     </div>`;
   }
   if(name==='clutter'){
-    return `<div style="margin-top:20px">
+    return `<div style="margin-top:20px" class="zoom-stage">
       <div class="hub-hero">
-        <div class="hub-orb" style="background:linear-gradient(135deg,#06d6a0,#118ab2)">◌</div>
+        <div class="hub-orb" style="background:linear-gradient(135deg,#75c6d7,#60bed1)"><svg viewBox="0 0 24 24" width="34" height="34"><use href="#cmm-ico-clutter"/></svg></div>
         <div>
           <h2>Space Lens &amp; Clutter Inspector</h2>
           <p>Visual storage hierarchy, exact byte duplicates, and large/old files breakdown.</p>
@@ -1105,42 +770,100 @@ function getPreScanHub(name){
       </div>
       <div class="hub-card-grid">
         <div class="hub-card">
-          <div class="hub-card-head"><div class="hub-card-title">🔭 Space Lens Hierarchy</div></div>
+          <div class="hub-card-head"><div class="hub-card-title"><svg viewBox="0 0 24 24" width="20" height="20" style="margin-right:6px"><use href="#cmm-ico-clutter"/></svg> Space Lens Hierarchy</div></div>
           <div class="hub-card-desc">Interactive proportional disk visualization highlighting top space consumers.</div>
         </div>
         <div class="hub-card">
-          <div class="hub-card-head"><div class="hub-card-title">👥 Exact Duplicate Files</div></div>
+          <div class="hub-card-head"><div class="hub-card-title"><svg viewBox="0 0 24 24" width="20" height="20" style="margin-right:6px"><use href="#cmm-ico-clutter"/></svg> Exact Duplicate Files</div></div>
           <div class="hub-card-desc">SHA-256 duplicate content identification to eliminate wasted duplicate storage.</div>
         </div>
         <div class="hub-card">
-          <div class="hub-card-head"><div class="hub-card-title">📦 Large &amp; Old Files</div></div>
+          <div class="hub-card-head"><div class="hub-card-title"><svg viewBox="0 0 24 24" width="20" height="20" style="margin-right:6px"><use href="#cmm-ico-clutter"/></svg> Large &amp; Old Files</div></div>
           <div class="hub-card-desc">Filter archives, ISOs, virtual disks, and forgotten files older than 6 months or 1 year.</div>
+        </div>
+      </div>
+    </div>`;
+  }
+  if(name==='reports'){
+    return `<div style="margin-top:20px" class="zoom-stage">
+      <div class="hub-hero">
+        <div class="hub-orb" style="background:linear-gradient(135deg,#06b6d4,#7bc8d7)"><svg viewBox="0 0 24 24" width="34" height="34"><use href="#cmm-ico-reports"/></svg></div>
+        <div>
+          <h2>System Care Reports &amp; Evidence</h2>
+          <p>Review comprehensive audit findings, export forensic Markdown Action Plans, inspect depth ledgers, and compare reports over time.</p>
+        </div>
+      </div>
+      <div class="panel" style="margin-top:20px;padding:24px;text-align:center">
+        <p style="font-size:15px;margin:0 0 12px 0">Run a scan from <b>Smart Audit</b> or import a previously exported ReconSpace report to generate actionable reports.</p>
+        <div style="display:flex;justify-content:center;gap:12px;flex-wrap:wrap">
+          <button type="button" class="primary" onclick="navigatePage('home')">✦ Run Smart Audit</button>
+          <label class="button secondary" style="cursor:pointer;margin:0;padding:6px 14px;border-radius:8px;display:inline-flex;align-items:center">
+            📂 Load Saved Report (.json)
+            <input type="file" accept=".json,application/json" style="display:none" onchange="handleReportImport(event)">
+          </label>
         </div>
       </div>
     </div>`;
   }
   return '';
 }
+
+let scanRunning=false, scanSubmitting=false, pageTransition=null, navigationSequence=0;
+let uiZoom=1;
+function setZoom(delta){
+  uiZoom=delta===0?1:Math.max(.85,Math.min(1.15,uiZoom+delta));
+  document.body.dataset.zoom=String(uiZoom);
+  document.body.style.setProperty('--ui-zoom',String(uiZoom));
+  $('#zoomReadout').textContent=Math.round(uiZoom*100)+'%';
+}
 function navigatePage(name,updateHistory=true){
+  const sequence=++navigationSequence;
+  if(pageTransition)pageTransition.skipTransition();
+  CareMotion.cancel();
+  document.body.dataset.motionDirection=name==='home'?'back':'forward';
+  const update=()=>{if(sequence!==navigationSequence)return;applyPage(name,updateHistory);CareMotion.marker();};
+  if(!CareMotion.reduced()){
+    pageTransition=REPORT||!document.startViewTransition?CareMotion.stage(update,document.body.dataset.motionDirection):document.startViewTransition(update);
+    pageTransition.ready.catch(()=>{});
+    pageTransition.finished.then(()=>{if(sequence===navigationSequence&&currentPage===name)CareMotion.reveal();},()=>{});
+  }else {update();CareMotion.reveal();}
+}
+function moduleWelcome(name){
+  const p=PAGES[name];
+  return `<section class="module-welcome"><div class="module-art" data-parallax><div class="parallax-object">${careArtwork(name)}</div></div><div class="module-welcome-copy"><span class="smart-eyebrow">Your PC, understood</span><h2>${esc(p.title)}</h2><p>${esc(p.description)}</p><p class="small">Start a read-only audit to discover real evidence. Nothing is removed or changed.</p><button onclick="navigatePage('home')">Go to Smart Audit</button>${name==='reports'?'<label class="import-button">Import report JSON<input aria-label="Import report JSON" type="file" accept=".json,application/json" onchange="handleReportImport(event)"></label>':''}</div></section>`;
+}
+function renderCareResults(){
+  if(!REPORT)return;
+  const rs=REPORT.reclaim_summary||{}, h=REPORT.audit_health||{};
+  const collectedCount=(rows,suffix)=>rows.length?rows.length+' '+suffix:'No records';
+  const cards=[['cleanup','clean','Storage',bytes(rs.path_candidates_nonoverlap_bytes||0),'Path candidates · review required'],['protection','protection','Protection',collectedCount(REPORT.binary_trust||[],'records'),'Signature inventory · check audit coverage'],['performance','performance','Performance',collectedCount(REPORT.processes||[],'processes'),'Process inventory · may be limited by profile'],['applications','applications','Applications',(REPORT.applications||[]).length+' apps','Installed application inventory'],['clutter','clutter','My Clutter',(REPORT.duplicates||[]).length+' groups','Duplicate potential · separate estimate']];
+  $('#careResults').innerHTML=`<div class="results-heading"><span class="smart-eyebrow">Your audit is ready</span><h2>A clearer picture of your PC.</h2><p>Explore your findings. You decide what happens next.</p></div><div class="results-grid">${cards.map(([page,icon,title,value,note])=>`<button class="result-card" data-parallax onclick="navigatePage('${page}')"><span class="result-art">${careArtwork(page)}</span><span class="result-title">${title}</span><b>${esc(value)}</b><small>${note}</small><span class="result-review">Review →</span></button>`).join('')}</div><div class="evidence-footer"><span>Evidence coverage: ${h.coverage_score===undefined?'not recorded':esc(h.coverage_score)+'/100'} · evidence quality, not PC health</span><button class="secondary" onclick="navigatePage('reports')">View audit evidence →</button></div><div class="results-footer"><span class="small">Read-only audit · no changes made</span><button onclick="navigatePage('settings')">Start another audit</button></div>`;
+}
+function applyPage(name,updateHistory=true){
   if(!PAGES[name])name='home';
   currentPage=name;
   const page=PAGES[name];
   document.body.dataset.page=name;
   $('#pageTitle').textContent=page.title;
   $$('button[data-page]').forEach(el=>{el.classList.toggle('active',el.dataset.page===name);if(el.classList.contains('rail-item')){if(el.dataset.page===name)el.setAttribute('aria-current','page');else el.removeAttribute('aria-current');}});
-  $('#scanComposer').classList.toggle('hidden',name!=='home'&&name!=='settings');
-  $('#liveMonitor').classList.toggle('hidden',name!=='home');
+  $('#scanComposer').classList.toggle('hidden',name==='home'?(scanRunning||!!REPORT):name!=='settings');
+  $('#liveMonitor').classList.toggle('hidden',name!=='home'||!scanRunning);
+  $('#careResults').classList.toggle('hidden',name!=='home'||!REPORT||scanRunning);
+  (name==='home'?$('#welcomeActions'):$('#scanSlot')).appendChild($('#scan'));
+  $('#scopeSummary').textContent=$('#root').value+' · '+$('#profile').value+' audit';
   const intro=$('#moduleIntro');
   intro.classList.toggle('hidden',name==='home'||name==='settings');
-  intro.innerHTML=`<section class="module-banner"><span class="module-symbol">${page.icon}</span><div><h2>${page.title}</h2><p>${page.description}</p></div><button type="button" class="secondary" onclick="navigatePage('settings')">Configure scan</button></section>${!REPORT?getPreScanHub(name):''}`;
-  $('#summary').classList.toggle('hidden',!REPORT||name==='settings');
+  intro.innerHTML=`<section class="module-banner"><span class="module-symbol">${careArtwork(name)}</span><div><h2>${page.title}</h2><p>${page.description}</p></div><button type="button" class="secondary" onclick="navigatePage('settings')">Configure scan</button></section>${!REPORT?(name==='ai'?getPreScanHub(name):moduleWelcome(name)):''}`;
+  $('#summary').classList.toggle('hidden',!REPORT||name==='settings'||name==='home');
   $$('.tab').forEach(el=>el.classList.toggle('hidden',!page.views.includes(el.dataset.view)));
-  if(REPORT&&page.views.length)switchTab(page.views[0]);
+  if(REPORT&&page.views.length&&name!=='home')switchTab(page.views[0],false);
   if(name==='settings')$('.advanced').open=true;
   else if(name==='home')$('.advanced').open=false;
   if(updateHistory&&location.hash!=='#'+name)history.pushState(null,'','#'+name);
+
   window.scrollTo({top:0,behavior:'instant'});
 }
+
 const MAX_IMPORTED_REPORT_BYTES=64*1024*1024,MAX_IMPORTED_SECTION_ROWS=100000;
 const $=s=>document.querySelector(s), $$=s=>document.querySelectorAll(s);
 
@@ -1287,17 +1010,17 @@ function label(d){
 function age(d){if(d===null||d===undefined)return 'unknown';return d<1?'<1 day':d<30?Math.round(d)+' days':d<365?(d/30).toFixed(1)+' months':(d/365).toFixed(1)+' years'}
 
 const CATEGORY_META = {
-  system_temp: { title: "System & Temporary Files", icon: "◌", desc: "Transient OS caches, crash dumps, and temp files. Review the owning workflow before any cleanup." },
-  dev_build: { title: "Development & Build Caches", icon: "⌘", desc: "Dependencies, intermediate compilers, virtualenvs, and package manager caches." },
-  ai_ml: { title: "AI & Machine Learning Models", icon: "⬡", desc: "Large weights, transformer models, and checkpoints (Ollama, HuggingFace, PyTorch, ComfyUI)." },
-  browser_app: { title: "Browsers & Application Data", icon: "◎", desc: "Browser cache storage, WebKit/Chromium storage, and communication app media buffers." },
-  apps_installers: { title: "Applications & Installers", icon: "◇", desc: "Installed software and setup packages. Use Windows or vendor-supported management; never delete program files manually." },
-  virtualization: { title: "Virtual Machines & Containers", icon: "▣", desc: "Virtual hard disks (VHDX), container layers, Docker images, and hypervisor disks." },
-  diagnostics: { title: "Diagnostics & Storage Candidates", icon: "⌁", desc: "Memory dumps, trace logs, database files, and large files requiring review." },
-  app_leftovers: { title: "Application Leftovers", icon: "⌂", desc: "Residual AppData and ProgramData folders from uninstalled applications." },
-  privacy_permissions: { title: "Privacy & Permissions", icon: "🛡", desc: "Hardware consent permissions, Defender status, and security findings." },
-  system_maintenance: { title: "System Maintenance", icon: "⚡", desc: "System memory pressure, performance optimization, and routine maintenance candidates." },
-  other: { title: "Other Storage Findings", icon: "·", desc: "Miscellaneous storage items and files requiring assessment." }
+  system_temp: { title: "System & Temporary Files", icon: cmmIcon('clean', 20), desc: "Transient OS caches, crash dumps, and temp files. Review the owning workflow before any cleanup." },
+  dev_build: { title: "Development & Build Caches", icon: cmmIcon('performance', 20), desc: "Dependencies, intermediate compilers, virtualenvs, and package manager caches." },
+  ai_ml: { title: "AI & Machine Learning Models", icon: cmmIcon('ai', 20), desc: "Large weights, transformer models, and checkpoints (Ollama, HuggingFace, PyTorch, ComfyUI)." },
+  browser_app: { title: "Browsers & Application Data", icon: cmmIcon('clean', 20), desc: "Browser cache storage, WebKit/Chromium storage, and communication app media buffers." },
+  apps_installers: { title: "Applications & Installers", icon: cmmIcon('applications', 20), desc: "Installed software and setup packages. Use Windows or vendor-supported management; never delete program files manually." },
+  virtualization: { title: "Virtual Machines & Containers", icon: cmmIcon('clutter', 20), desc: "Virtual hard disks (VHDX), container layers, Docker images, and hypervisor disks." },
+  diagnostics: { title: "Diagnostics & Storage Candidates", icon: cmmIcon('reports', 20), desc: "Memory dumps, trace logs, database files, and large files requiring review." },
+  app_leftovers: { title: "Application Leftovers", icon: cmmIcon('applications', 20), desc: "Residual AppData and ProgramData folders from uninstalled applications." },
+  privacy_permissions: { title: "Privacy & Permissions", icon: cmmIcon('protection', 20), desc: "Hardware consent permissions, Defender status, and security findings." },
+  system_maintenance: { title: "System Maintenance", icon: cmmIcon('performance', 20), desc: "System memory pressure, performance optimization, and routine maintenance candidates." },
+  other: { title: "Other Storage Findings", icon: cmmIcon('smart', 20), desc: "Miscellaneous storage items and files requiring assessment." }
 };
 
 const CATEGORY_MAP = {
@@ -1328,7 +1051,11 @@ function selectCat(catId) {
   render();
 }
 
-function switchTab(viewName) {
+function switchTab(viewName,animateView=true) {
+  if(REPORT&&!PAGES[currentPage].views.includes(viewName)){
+    const owner=Object.keys(PAGES).find(name=>name!=='home'&&PAGES[name].views.includes(viewName));
+    if(owner)applyPage(owner,true);
+  }
   let activeTab=null;
   $$('.tab').forEach(x => {
     let active = x.dataset.view === viewName;
@@ -1340,6 +1067,7 @@ function switchTab(viewName) {
   if(activeTab)$('#view').setAttribute('aria-labelledby',activeTab.id);
   currentView = viewName;
   render();
+  if(animateView)CareMotion.animate($('#view'),[{opacity:.45,transform:'translateY(5px)'},{opacity:1,transform:'none'}],{duration:240,easing:'ease-out'});
 }
 
 function switchCategory(catId) {
@@ -1452,7 +1180,7 @@ function actionPlan(){
 
 function treemap(rows){
   let total=rows.reduce((n,x)=>n+(Number(x.size_bytes)||0),0)||1;
-  return `<div class="chart"><h3>Retained folder treemap</h3><div style="display:flex;flex-wrap:wrap;gap:4px;min-height:260px;align-content:stretch">${rows.map((x,i)=>{let weight=Math.max(7,(Number(x.size_bytes)||0)/total*100);return `<div title="${esc(x.path)} — ${bytes(x.size_bytes)}" style="flex:${weight} 1 ${Math.max(90,weight*8)}px;min-height:${70+(i%3)*18}px;border:1px solid var(--border);border-radius:8px;padding:8px;background:linear-gradient(135deg,rgba(99,102,241,.18),rgba(56,189,248,.10));overflow:hidden"><b>${bytes(x.size_bytes)}</b><div class="path">${esc(x.path)}</div></div>`}).join('')}</div><div class="small" style="margin-top:8px">Area is proportional only within the retained top-folder set, not the entire filesystem.</div></div>`;
+  return `<div class="chart"><h3>Retained folder treemap</h3><div style="display:flex;flex-wrap:wrap;gap:4px;min-height:260px;align-content:stretch">${rows.map((x,i)=>{let weight=Math.max(7,(Number(x.size_bytes)||0)/total*100);return `<div title="${esc(x.path)} — ${bytes(x.size_bytes)}" style="flex:${weight} 1 ${Math.max(90,weight*8)}px;min-height:${70+(i%3)*18}px;border:1px solid var(--border);border-radius:8px;padding:8px;background:linear-gradient(135deg,rgba(127,198,213,.18),rgba(56,189,248,.10));overflow:hidden"><b>${bytes(x.size_bytes)}</b><div class="path">${esc(x.path)}</div></div>`}).join('')}</div><div class="small" style="margin-top:8px">Area is proportional only within the retained top-folder set, not the entire filesystem.</div></div>`;
 }
 
 function overview(){
@@ -1486,12 +1214,65 @@ function overview(){
   let orphCount=orphColl&&orphColl.ok&&Array.isArray(orphColl.data)?orphColl.data.length:0;
   let appMetric=appCount?`${appCount} apps`+(orphCount?` · ${orphCount} leftovers`:''):'Audited';
 
+  let dupBytes=(REPORT.duplicates||[]).reduce((a,c)=>a+(c.waste_bytes||0),0);
+  let largeFilesCount=(REPORT.top_files||[]).filter(x=>(x.size_bytes||0)>=500*1024*1024).length;
+  let clutterMetric=dupBytes>0?`${bytes(dupBytes)} duplicate waste`:(largeFilesCount?`${largeFilesCount} large files`:'Space Lens mapped');
+  let aiMetric=AI_RESULT ? `Score: ${AI_RESULT.overall_score}/100` : 'Ready to analyze';
+
+  let hiberColl=getCollector('hibernation_pagefile_intelligence');
+  let hiberData=(hiberColl&&hiberColl.ok&&hiberColl.data)||{};
+  let doColl=getCollector('delivery_optimization_status');
+  let doData=(doColl&&doColl.ok&&doColl.data)||{};
+  let batColl=getCollector('battery_power_health');
+  let batData=(batColl&&batColl.ok&&batColl.data)||{};
+  let dumpsColl=getCollector('crash_dumps_inventory');
+  let dumpsData=(dumpsColl&&dumpsColl.ok&&dumpsColl.data)||{};
+  let rbColl=getCollector('recycle_bin_metrics');
+  let rbData=(rbColl&&rbColl.ok&&rbColl.data)||{};
+
+  let aiBanner = `
+    <div class="panel ai-overview-banner" style="margin-top:16px;padding:18px 22px;border-left:4px solid #2c8394;background:linear-gradient(135deg,rgba(44,131,148,0.12),rgba(101,187,204,0.08));display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:16px;border-radius:18px">
+      <div style="display:flex;align-items:center;gap:16px">
+        <div style="width:46px;height:46px;border-radius:14px;background:linear-gradient(135deg,#2c8394,#65bbcc);display:flex;align-items:center;justify-content:center;color:#fff;font-size:22px;flex-shrink:0;box-shadow:0 6px 18px rgba(44,131,148,0.35)">✦</div>
+        <div>
+          <div style="font-weight:750;font-size:16px;display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+            <span>AI Audit Advisor</span>
+            ${AI_RESULT ? `
+              <span class="badge" style="background:${AI_RESULT.overall_score>=80?'#06d6a0':(AI_RESULT.overall_score>=60?'#ffd166':'#ef476f')};color:#000;font-weight:800;font-size:12px;padding:3px 10px;border-radius:12px">
+                System Wellness: ${AI_RESULT.overall_score}/100
+              </span>
+            ` : `
+              <span class="badge" style="background:rgba(255,255,255,0.1);color:var(--fg);font-size:11px">Ready to analyze</span>
+            `}
+          </div>
+          <div class="small" style="margin-top:4px;color:var(--muted);line-height:1.4">
+            ${AI_RESULT ? `
+              <b>${(AI_RESULT.critical_actions||[]).length}</b> critical action(s) · <b>${(AI_RESULT.quick_wins||[]).length}</b> quick win(s) · <b>${(AI_RESULT.safety_warnings||[]).length}</b> developer invariants guarded
+            ` : `
+              Synthesize Windows storage findings, Defender posture, RAM loads, and developer toolchain invariants using OpenAI, Claude, Gemini, or private local Ollama.
+            `}
+          </div>
+        </div>
+      </div>
+      <div style="display:flex;gap:10px;flex-wrap:wrap">
+        ${AI_RESULT ? `
+          <button type="button" class="primary" style="background:linear-gradient(135deg,#2c8394,#65bbcc);border:none;padding:10px 18px;border-radius:12px;font-weight:700" onclick="navigatePage('ai')">✦ View Full AI Review</button>
+        ` : `
+          <button type="button" class="primary" style="background:linear-gradient(135deg,#2c8394,#65bbcc);border:none;padding:10px 18px;border-radius:12px;font-weight:700" onclick="runAIReview()" ${AI_RUNNING?'disabled':''}>
+            ${AI_RUNNING ? '⏳ Analyzing Telemetry...' : '✦ Run AI Analysis Now'}
+          </button>
+          <button type="button" class="secondary" style="padding:10px 14px;border-radius:12px" onclick="navigatePage('ai')">⚙ Configure Engine</button>
+        `}
+      </div>
+    </div>
+  `;
+
   let pillarGrid=`
-    <div class="pillar-grid">
+    <div class="pillar-grid" style="margin-top:16px">
       <div class="pillar-card cleanup-pillar" onclick="navigatePage('cleanup')" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();navigatePage('cleanup')}" role="button" tabindex="0" title="Open Cleanup module">
         <div class="pillar-head">
           <span class="pillar-title">Cleanup</span>
-          <div class="pillar-icon">⌁</div>
+          <div class="pillar-icon"><svg viewBox="0 0 24 24" width="26" height="26"><use href="#cmm-ico-clean"/></svg></div>
         </div>
         <div class="pillar-sub">System caches, build folders, browser temp &amp; logs</div>
         <div class="pillar-metric">${totalReclaim>0?bytes(totalReclaim)+' reclaim':(REPORT.findings||[]).length+' findings'}</div>
@@ -1499,7 +1280,7 @@ function overview(){
       <div class="pillar-card protection-pillar" onclick="navigatePage('protection')" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();navigatePage('protection')}" role="button" tabindex="0" title="Open Protection module">
         <div class="pillar-head">
           <span class="pillar-title">Protection</span>
-          <div class="pillar-icon">◇</div>
+          <div class="pillar-icon"><svg viewBox="0 0 24 24" width="26" height="26"><use href="#cmm-ico-protection"/></svg></div>
         </div>
         <div class="pillar-sub">Defender status, app privacy permissions &amp; binary trust</div>
         <div class="pillar-metric" style="color:${defOk?'var(--good)':'var(--warn)'}">${protMetric}</div>
@@ -1507,7 +1288,7 @@ function overview(){
       <div class="pillar-card performance-pillar" onclick="navigatePage('performance')" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();navigatePage('performance')}" role="button" tabindex="0" title="Open Performance module">
         <div class="pillar-head">
           <span class="pillar-title">Performance</span>
-          <div class="pillar-icon">↯</div>
+          <div class="pillar-icon"><svg viewBox="0 0 24 24" width="26" height="26"><use href="#cmm-ico-performance"/></svg></div>
         </div>
         <div class="pillar-sub">Memory load, startup items &amp; maintenance routines</div>
         <div class="pillar-metric">${memLoad}</div>
@@ -1515,10 +1296,84 @@ function overview(){
       <div class="pillar-card applications-pillar" onclick="navigatePage('applications')" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();navigatePage('applications')}" role="button" tabindex="0" title="Open Applications module">
         <div class="pillar-head">
           <span class="pillar-title">Applications</span>
-          <div class="pillar-icon">▦</div>
+          <div class="pillar-icon"><svg viewBox="0 0 24 24" width="26" height="26"><use href="#cmm-ico-applications"/></svg></div>
         </div>
         <div class="pillar-sub">Installed software footprints &amp; orphaned leftovers</div>
         <div class="pillar-metric">${appMetric}</div>
+      </div>
+      <div class="pillar-card clutter-pillar" onclick="navigatePage('clutter')" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();navigatePage('clutter')}" role="button" tabindex="0" title="Open My Clutter module">
+        <div class="pillar-head">
+          <span class="pillar-title">My Clutter</span>
+          <div class="pillar-icon"><svg viewBox="0 0 24 24" width="26" height="26"><use href="#cmm-ico-clutter"/></svg></div>
+        </div>
+        <div class="pillar-sub">Space Lens tree, exact duplicates &amp; large old files</div>
+        <div class="pillar-metric">${clutterMetric}</div>
+      </div>
+      <div class="pillar-card ai-pillar" onclick="navigatePage('ai')" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();navigatePage('ai')}" role="button" tabindex="0" title="Open AI Advisor module">
+        <div class="pillar-head">
+          <span class="pillar-title">AI Advisor</span>
+          <div class="pillar-icon"><svg viewBox="0 0 24 24" width="26" height="26"><use href="#cmm-ico-ai"/></svg></div>
+        </div>
+        <div class="pillar-sub">AI triage, system wellness score &amp; PowerShell recipes</div>
+        <div class="pillar-metric" style="color:#9cd8e4">${aiMetric}</div>
+      </div>
+    </div>
+  `;
+
+  let sysIntelCards = `
+    <div style="margin-top:20px">
+      <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:8px">
+        <h3 style="margin:0;font-size:16px;font-weight:750">Open-Source Windows Intelligence Telemetry</h3>
+        <span class="small">Dism++, PrivaZer, Stacer &amp; Microsoft Sysinternals collectors</span>
+      </div>
+      <div class="grid" style="grid-template-columns:repeat(auto-fit, minmax(240px, 1fr));gap:12px">
+        <div class="panel" style="padding:14px;border-radius:14px">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">
+            <span style="font-weight:700;font-size:13px">Dism++ Hibernation Sizing</span>
+            <span class="small mono">${esc(hiberData.drive||'C:')}</span>
+          </div>
+          <div style="font-size:16px;font-weight:800;color:var(--primary)">${bytes(hiberData.hiberfil_bytes||0)}</div>
+          <div class="small" style="margin-top:2px;color:var(--muted)">Mode: <b>${esc(hiberData.hiber_file_type||'Standard')}</b></div>
+          ${hiberData.potential_reduced_savings_bytes > 0 ? `<div class="small safe" style="font-weight:700;margin-top:4px">Save ~${bytes(hiberData.potential_reduced_savings_bytes)} in Reduced Mode</div>` : ''}
+        </div>
+
+        <div class="panel" style="padding:14px;border-radius:14px">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">
+            <span style="font-weight:700;font-size:13px">Delivery Optimization P2P</span>
+            <span class="badge ${doData.bytes_uploaded_to_peers>1024*1024*1024?'review':'safe'}">${doData.cache_size_bytes!=null?bytes(doData.cache_size_bytes):'Ready'}</span>
+          </div>
+          <div style="font-size:16px;font-weight:800">${bytes(doData.cache_size_bytes||0)}</div>
+          <div class="small" style="margin-top:2px;color:var(--muted)">Uploaded to Peers: <b>${bytes(doData.bytes_uploaded_to_peers||0)}</b></div>
+        </div>
+
+        <div class="panel" style="padding:14px;border-radius:14px">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">
+            <span style="font-weight:700;font-size:13px">Crash Dumps &amp; Recycle Bin</span>
+            <span class="small mono">${dumpsData.total_dumps_count||0} dumps</span>
+          </div>
+          <div style="font-size:16px;font-weight:800">${bytes((dumpsData.total_size_bytes||0)+(rbData.total_size_bytes||0))}</div>
+          <div class="small" style="margin-top:2px;color:var(--muted)">WER Dumps: <b>${bytes(dumpsData.total_size_bytes||0)}</b> · Recycle Bin: <b>${bytes(rbData.total_size_bytes||0)}</b></div>
+        </div>
+
+        ${batData.is_battery_present ? `
+          <div class="panel" style="padding:14px;border-radius:14px">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">
+              <span style="font-weight:700;font-size:13px">Battery &amp; Power Health</span>
+              <span class="badge ${batData.wear_level_percent>30?'review':'safe'}">${batData.charge_percent!=null?batData.charge_percent+'%':''}</span>
+            </div>
+            <div style="font-size:16px;font-weight:800">${esc(batData.status||'Active')}</div>
+            <div class="small" style="margin-top:2px;color:var(--muted)">Wear Level: <b>${batData.wear_level_percent!=null?batData.wear_level_percent+'%':'Good'}</b></div>
+          </div>
+        ` : `
+          <div class="panel" style="padding:14px;border-radius:14px">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">
+              <span style="font-weight:700;font-size:13px">Hardware ConsentStore</span>
+              <span class="safe">${privCount} permissions</span>
+            </div>
+            <div style="font-size:16px;font-weight:800">${privCount} Granted</div>
+            <div class="small" style="margin-top:2px;color:var(--muted)">Webcam, microphone &amp; location access</div>
+          </div>
+        `}
       </div>
     </div>
   `;
@@ -1546,7 +1401,9 @@ function overview(){
   }
 
   return `${decisionBrief()}
+    ${aiBanner}
     ${pillarGrid}
+    ${sysIntelCards}
     <div class="chart">
       <h3>Volume capacity</h3>
       <div><b>${bytes(used)}</b> used of ${bytes(total)} · <span class="safe">${bytes(s.filesystem_free_bytes)} free</span></div>
@@ -1787,6 +1644,12 @@ function cleanupHub(){
   let csData = (csColl && csColl.ok && csColl.data) || {};
   let wuColl = getCollector('windows_update_cache');
   let wuData = (wuColl && wuColl.ok && wuColl.data) || {};
+  let doColl = getCollector('delivery_optimization_status');
+  let doData = (doColl && doColl.ok && doColl.data) || {};
+  let dumpsColl = getCollector('crash_dumps_inventory');
+  let dumpsData = (dumpsColl && dumpsColl.ok && dumpsColl.data) || {};
+  let rbColl = getCollector('recycle_bin_metrics');
+  let rbData = (rbColl && rbColl.ok && rbColl.data) || {};
   let totalReclaim=(REPORT.findings||[]).reduce((a,c)=>a+(c.estimated_reclaimable_bytes||0),0);
   let cleanupFindings=(REPORT.findings||[]).filter(f=>['system_temp','dev_build','ai_ml','browser_app','apps_installers','virtualization','app_leftovers'].includes(getCategoryGroup(f)));
   let topReclaimable=[...cleanupFindings].sort((a,b)=>(b.estimated_reclaimable_bytes||0)-(a.estimated_reclaimable_bytes||0)).slice(0,8);
@@ -1823,7 +1686,7 @@ function cleanupHub(){
 
   return `
     <div class="hub-hero">
-      <div class="hub-orb">⌁</div>
+      <div class="hub-orb" style="background:linear-gradient(135deg,#00f2fe,#4facfe)"><svg viewBox="0 0 24 24" width="34" height="34"><use href="#cmm-ico-clean"/></svg></div>
       <div>
         <h2>Cleanup Intelligence</h2>
         <p>Comprehensive audit of disposable system caches, developer artifacts, browser caches, and orphaned application leftovers. Strictly read-only with copyable PowerShell commands.</p>
@@ -1901,6 +1764,36 @@ function cleanupHub(){
             <button type="button" class="secondary" style="font-size:11px;padding:3px 8px" onclick="copyPath(this, 'Get-ChildItem &quot;$env:SystemRoot\\SoftwareDistribution\\Download&quot; -Recurse -Force -ErrorAction SilentlyContinue | Measure-Object -Property Length -Sum')">Copy</button>
           </div>
         </div>
+        <div class="hub-card">
+          <div class="hub-card-title">🌐 Delivery Optimization P2P Cache</div>
+          <div class="hub-card-desc">
+            ${doData.cache_size_bytes != null ? `<div>Cache Size: <b>${bytes(doData.cache_size_bytes)}</b></div><div>Uploaded to Peers: <b class="${doData.bytes_uploaded_to_peers>1024*1024*1024?'review':'safe'}">${bytes(doData.bytes_uploaded_to_peers||0)}</b></div><div class="small" style="margin-top:2px">Mode: ${esc(doData.download_mode||'Default')}</div>` : 'Windows Update peer distribution cache and upload bandwidth telemetry.'}
+          </div>
+          <div class="recipe-box">
+            <span class="recipe-code">Delete-DeliveryOptimizationCache</span>
+            <button type="button" class="secondary" style="font-size:11px;padding:3px 8px" onclick="copyPath(this, 'Delete-DeliveryOptimizationCache')">Copy</button>
+          </div>
+        </div>
+        <div class="hub-card">
+          <div class="hub-card-title">💥 Windows Crash Dumps &amp; WER</div>
+          <div class="hub-card-desc">
+            ${dumpsData.total_dumps_count != null ? `<div>Total Crash Dumps: <b>${dumpsData.total_dumps_count}</b></div><div>Accumulated Size: <b class="${dumpsData.total_size_bytes>500*1024*1024?'review':'safe'}">${bytes(dumpsData.total_size_bytes||0)}</b></div>` : 'Audit memory dumps, minidumps, and Windows Error Reporting crash traces.'}
+          </div>
+          <div class="recipe-box">
+            <span class="recipe-code">Get-ChildItem -Path '$env:LOCALAPPDATA\\CrashDumps', '$env:SystemRoot\\Minidump' -Filter *.dmp -ErrorAction SilentlyContinue</span>
+            <button type="button" class="secondary" style="font-size:11px;padding:3px 8px" onclick="copyPath(this, 'Get-ChildItem -Path \\'$env:LOCALAPPDATA\\\\CrashDumps\\', \\'$env:SystemRoot\\\\Minidump\\' -Filter *.dmp -ErrorAction SilentlyContinue')">Copy</button>
+          </div>
+        </div>
+        <div class="hub-card">
+          <div class="hub-card-title">🗑️ Recycle Bin Depth (${esc(rbData.drive||'C:')})</div>
+          <div class="hub-card-desc">
+            ${rbData.item_count != null ? `<div>Deleted Items: <b>${rbData.item_count}</b></div><div>Volume Allocated: <b class="${rbData.total_size_bytes>500*1024*1024?'review':'safe'}">${bytes(rbData.total_size_bytes||0)}</b></div>` : 'Query exact items and allocated bytes inside $Recycle.Bin.'}
+          </div>
+          <div class="recipe-box">
+            <span class="recipe-code">${esc(rbData.inspect_recipe || "Get-ChildItem -Path 'C:\\$Recycle.Bin' -Force -Recurse | Measure-Object -Property Length -Sum")}</span>
+            <button type="button" class="secondary" style="font-size:11px;padding:3px 8px" onclick="copyPath(this, '${esc(rbData.inspect_recipe || "Get-ChildItem -Path 'C:\\$Recycle.Bin' -Force -Recurse | Measure-Object -Property Length -Sum").replace(/'/g, "\\'")}')">Copy</button>
+          </div>
+        </div>
       </div>
     </div>
   `;
@@ -1940,7 +1833,7 @@ function protectionHub(){
 
   return `
     <div class="hub-hero">
-      <div class="hub-orb" style="background:linear-gradient(135deg,#5dd39e,#348aa7)">◇</div>
+      <div class="hub-orb" style="background:linear-gradient(135deg,#10b981,#06b6d4)"><svg viewBox="0 0 24 24" width="34" height="34"><use href="#cmm-ico-protection"/></svg></div>
       <div>
         <h2>Security &amp; Privacy Protection</h2>
         <p>Windows security posture audit: Microsoft Defender real-time protection, signature currency, hardware privacy permissions (ConsentStore), browser footprints, and Authenticode binary trust.</p>
@@ -2132,6 +2025,12 @@ function protectionHub(){
 function performanceHub(){
   let memColl = getCollector('system_memory_status');
   let mem = (memColl && memColl.ok && memColl.data) || {};
+  let hiberColl = getCollector('hibernation_pagefile_intelligence');
+  let hiberData = (hiberColl && hiberColl.ok && hiberColl.data) || {};
+  let batColl = getCollector('battery_power_health');
+  let batData = (batColl && batColl.ok && batColl.data) || {};
+  let netColl = getCollector('network_adapters_telemetry');
+  let netData = (netColl && netColl.ok && netColl.data) || {};
   let totalPhys = mem.total_physical_bytes || 0;
   let availPhys = mem.available_physical_bytes || 0;
   let usedPhys = mem.used_physical_bytes || (totalPhys - availPhys);
@@ -2146,7 +2045,7 @@ function performanceHub(){
 
   return `
     <div class="hub-hero">
-      <div class="hub-orb" style="background:linear-gradient(135deg,#ffd166,#ef476f)">↯</div>
+      <div class="hub-orb" style="background:linear-gradient(135deg,#fbbf24,#ef4444)"><svg viewBox="0 0 24 24" width="34" height="34"><use href="#cmm-ico-performance"/></svg></div>
       <div>
         <h2>System Performance &amp; Speed</h2>
         <p>Monitor physical RAM pressure, working set distribution across running processes, boot persistence overhead, and run standard Microsoft maintenance recipes.</p>
@@ -2174,6 +2073,81 @@ function performanceHub(){
       <div class="diskbar" style="margin:10px 0"><i style="width:${loadPct}%;background:${loadPct>=85?'var(--bad)':loadPct>=70?'var(--warn)':'var(--primary)'}"></i></div>
       ${totalPage > 0 ? `<div class="small" style="margin-top:4px">Committed Pagefile: <b>${bytes(usedPage)}</b> of <b>${bytes(totalPage)}</b> (${bytes(availPage)} free)</div>` : ''}
     </div>
+
+    <!-- Windows Hibernation & Pagefile Sizing Intelligence (Dism++ style) -->
+    <div class="chart" style="margin-top:20px">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+        <h3 style="margin:0;font-size:15px;font-weight:750">Windows Hibernation &amp; Pagefile Sizing (Dism++ Intelligence)</h3>
+        <span class="small mono">${esc(hiberData.drive || 'C:')}</span>
+      </div>
+      <div class="grid" style="grid-template-columns:repeat(auto-fit, minmax(200px, 1fr));gap:12px;margin-top:10px">
+        <div style="background:var(--card);padding:12px;border-radius:8px;border:1px solid var(--border)">
+          <div class="small" style="font-weight:600">Hibernation File (hiberfil.sys)</div>
+          <div style="font-size:18px;font-weight:750;margin-top:4px">${bytes(hiberData.hiberfil_bytes||0)}</div>
+          <div class="small" style="margin-top:4px;color:var(--muted)">Mode: <b>${esc(hiberData.hiber_file_type||'unknown')}</b></div>
+          ${hiberData.potential_reduced_savings_bytes > 0 ? `
+            <div style="margin-top:8px">
+              <span class="safe small" style="font-weight:700">Save ~${bytes(hiberData.potential_reduced_savings_bytes)} in Reduced Mode</span>
+              <div class="recipe-box" style="margin-top:6px">
+                <span class="recipe-code">powercfg /hibernate /type reduced</span>
+                <button type="button" class="secondary" style="font-size:10px;padding:2px 6px" onclick="copyPath(this, 'powercfg /hibernate /type reduced')">Copy</button>
+              </div>
+            </div>
+          ` : ''}
+        </div>
+        <div style="background:var(--card);padding:12px;border-radius:8px;border:1px solid var(--border)">
+          <div class="small" style="font-weight:600">Virtual Memory Pagefile (pagefile.sys)</div>
+          <div style="font-size:18px;font-weight:750;margin-top:4px">${bytes(hiberData.pagefile_bytes||0)}</div>
+          <div class="small" style="margin-top:4px;color:var(--muted)">Committed swap backing store</div>
+        </div>
+        <div style="background:var(--card);padding:12px;border-radius:8px;border:1px solid var(--border)">
+          <div class="small" style="font-weight:600">App Suspend Swap (swapfile.sys)</div>
+          <div style="font-size:18px;font-weight:750;margin-top:4px">${bytes(hiberData.swapfile_bytes||0)}</div>
+          <div class="small" style="margin-top:4px;color:var(--muted)">Windows UWP / Modern App suspend</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Battery & Power Health (Stacer / Glances style) -->
+    ${batData.is_battery_present ? `
+      <div class="chart" style="margin-top:20px">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+          <h3 style="margin:0;font-size:15px;font-weight:750">Battery &amp; Power Health</h3>
+          <span class="badge ${batData.wear_level_percent && batData.wear_level_percent > 30 ? 'review' : 'safe'}">Wear: ${batData.wear_level_percent != null ? batData.wear_level_percent + '%' : 'Good'}</span>
+        </div>
+        <div style="display:flex;gap:20px;align-items:center;flex-wrap:wrap">
+          <div><b>Charge:</b> ${batData.charge_percent != null ? batData.charge_percent + '%' : 'Unknown'} (${esc(batData.status || 'Active')})</div>
+          ${batData.design_capacity_mwh ? `<div><b>Design:</b> ${batData.design_capacity_mwh} mWh · <b>Full:</b> ${batData.full_charge_capacity_mwh} mWh</div>` : ''}
+          ${batData.estimated_runtime_minutes ? `<div><b>Est. Runtime:</b> ${batData.estimated_runtime_minutes} mins</div>` : ''}
+          <div class="recipe-box" style="margin:0;margin-left:auto">
+            <span class="recipe-code">powercfg /batteryreport</span>
+            <button type="button" class="secondary" style="font-size:10px;padding:2px 6px" onclick="copyPath(this, 'powercfg /batteryreport /output $HOME\\\\battery-report.html')">Generate Report</button>
+          </div>
+        </div>
+      </div>
+    ` : ''}
+
+    <!-- Active Network Adapters Telemetry (Glances style) -->
+    ${netData.adapters && netData.adapters.length ? `
+      <div class="chart" style="margin-top:20px">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+          <h3 style="margin:0;font-size:15px;font-weight:750">Active Network Adapters &amp; Telemetry</h3>
+          <span class="small">${netData.active_adapters_count} active of ${netData.total_adapters_count}</span>
+        </div>
+        <div style="display:flex;gap:12px;flex-wrap:wrap;margin-top:8px">
+          ${netData.adapters.map(a => `
+            <div style="background:var(--card);padding:10px 14px;border-radius:8px;border:1px solid var(--border);min-width:180px">
+              <div style="display:flex;align-items:center;gap:6px">
+                <span class="${a.is_up ? 'safe' : 'small'}">●</span>
+                <b>${esc(a.name)}</b>
+              </div>
+              <div class="small mono" style="margin-top:4px">${esc(a.link_speed || '0 bps')} · ${esc(a.status)}</div>
+              <div class="small" style="color:var(--muted);margin-top:2px">${esc(a.description || '')}</div>
+            </div>
+          `).join('')}
+        </div>
+      </div>
+    ` : ''}
 
     <!-- Top Processes by Working Set -->
     <div style="margin-top:24px">
@@ -2296,7 +2270,7 @@ function applicationsHub(){
 
   return `
     <div class="hub-hero">
-      <div class="hub-orb" style="background:linear-gradient(135deg,#ff70a6,#70d6ff)">▦</div>
+      <div class="hub-orb" style="background:linear-gradient(135deg,#ec4899,#7bc8d7)"><svg viewBox="0 0 24 24" width="34" height="34"><use href="#cmm-ico-applications"/></svg></div>
       <div>
         <h2>Applications &amp; Leftovers Manager</h2>
         <p>Inspect installed software footprints, discover residual AppData folders left behind by uninstalled applications (Bulk Crap Uninstaller heuristics), and review silent uninstall recipes.</p>
@@ -2421,7 +2395,7 @@ function clutterHub(){
 
   return `
     <div class="hub-hero">
-      <div class="hub-orb" style="background:linear-gradient(135deg,#06d6a0,#118ab2)">◌</div>
+      <div class="hub-orb" style="background:linear-gradient(135deg,#75c6d7,#60bed1)"><svg viewBox="0 0 24 24" width="34" height="34"><use href="#cmm-ico-clutter"/></svg></div>
       <div>
         <h2>My Clutter &amp; Space Lens</h2>
         <p>Interactive visual disk hierarchy (Space Lens), exact duplicate byte analysis, and large &amp; forgotten file inspector to quickly pinpoint and eliminate disk bloat.</p>
@@ -2442,25 +2416,7 @@ function clutterHub(){
       </div>
     </div>
 
-    <!-- Space Lens Hierarchy -->
-    <div style="margin-top:20px">
-      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
-        <h3 style="margin:0;font-size:16px;font-weight:750">Space Lens — Proportional Folder Map</h3>
-        <span class="small">Click any folder to inspect its direct contents in the Folders tab</span>
-      </div>
-      <div class="lens-tree">
-        ${dirs.map(d => {
-          let pct = Math.min(100, Math.round((d.size_bytes || 0) / maxDirSize * 100));
-          return `
-            <div class="lens-row" onclick="switchTab('dirs')" title="Inspect ${esc(d.path)} in Folders view">
-              <div style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:600">📁 ${esc(d.path.split(/[\\/]/).filter(Boolean).pop()||d.path)}</div>
-              <div class="lens-bar-wrap"><div class="lens-bar" style="width:${pct}%"></div></div>
-              <div style="text-align:right;font-weight:750">${bytes(d.size_bytes)}</div>
-            </div>
-          `;
-        }).join('')}
-      </div>
-    </div>
+    ${spaceLens()}
 
     <!-- Duplicate Summary Card -->
     <div style="margin-top:24px">
@@ -2504,6 +2460,354 @@ function clutterHub(){
   `;
 }
 
+let AI_RESULT = null;
+let AI_RUNNING = false;
+let AI_CATEGORY_FILTER = 'all';
+
+function onAIProviderChange(val){
+  localStorage.setItem('rs_ai_provider', val);
+  ['#aiKeyBox', '#aiKeyBoxPre'].forEach(id=>{
+    let el = $(id);
+    if(el) el.style.display = (val === 'heuristic' || val === 'ollama') ? 'none' : '';
+  });
+  ['#aiEndpointBox', '#aiEndpointBoxPre'].forEach(id=>{
+    let el = $(id);
+    if(el) el.style.display = val === 'heuristic' ? 'none' : '';
+  });
+  ['#aiModelInput', '#aiModelInputPre'].forEach(id=>{
+    let modelInput = $(id);
+    if(modelInput && !modelInput.value){
+      if(val === 'openai') modelInput.placeholder = 'gpt-4o';
+      else if(val === 'anthropic') modelInput.placeholder = 'claude-3-5-sonnet-20241022';
+      else if(val === 'gemini') modelInput.placeholder = 'gemini-1.5-flash';
+      else if(val === 'ollama') modelInput.placeholder = 'llama3:latest';
+    }
+  });
+}
+
+function setAICategoryFilter(cat){
+  AI_CATEGORY_FILTER = cat;
+  render();
+}
+
+async function copySanitizedPrompt(btn){
+  let oldText = btn.textContent;
+  btn.textContent = '⏳ Preparing prompt...';
+  try{
+    let resp = await fetch('/api/ai-prompt?token=' + encodeURIComponent(token), {
+      method: REPORT ? 'POST' : 'GET',
+      headers: REPORT ? {'Content-Type': 'application/json'} : {},
+      body: REPORT ? JSON.stringify({report: REPORT}) : undefined
+    });
+    if(!resp.ok) throw new Error('Failed to fetch prompt');
+    let data = await resp.json();
+    let promptText = data.prompt || '';
+    if(navigator.clipboard && navigator.clipboard.writeText){
+      await navigator.clipboard.writeText(promptText);
+    }else{
+      let ta = document.createElement('textarea');
+      ta.value = promptText;
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand('copy');
+      document.body.removeChild(ta);
+    }
+    btn.textContent = '✓ Copied to Clipboard!';
+    setTimeout(() => btn.textContent = oldText, 2500);
+  }catch(e){
+    alert('Failed to copy prompt: ' + e.message);
+    btn.textContent = oldText;
+  }
+}
+
+async function runAIReview(){
+  let provider = ($('#aiProviderSelect') && $('#aiProviderSelect').value) ||
+                 ($('#aiProviderSelectPre') && $('#aiProviderSelectPre').value) ||
+                 localStorage.getItem('rs_ai_provider') || 'heuristic';
+  let apiKey = ($('#aiApiKeyInput') && $('#aiApiKeyInput').value.trim()) ||
+               ($('#aiApiKeyInputPre') && $('#aiApiKeyInputPre').value.trim()) ||
+               localStorage.getItem('rs_ai_key') || '';
+  let model = ($('#aiModelInput') && $('#aiModelInput').value.trim()) ||
+              ($('#aiModelInputPre') && $('#aiModelInputPre').value.trim()) ||
+              localStorage.getItem('rs_ai_model') || '';
+  let endpoint = ($('#aiEndpointInput') && $('#aiEndpointInput').value.trim()) ||
+                 ($('#aiEndpointInputPre') && $('#aiEndpointInputPre').value.trim()) ||
+                 localStorage.getItem('rs_ai_endpoint') || '';
+  let redact = true;
+  if($('#aiRedactToggle')) redact = $('#aiRedactToggle').checked;
+  else if($('#aiRedactTogglePre')) redact = $('#aiRedactTogglePre').checked;
+
+  try{
+    localStorage.setItem('rs_ai_provider', provider);
+    if(apiKey) localStorage.setItem('rs_ai_key', apiKey);
+    if(model) localStorage.setItem('rs_ai_model', model);
+    if(endpoint) localStorage.setItem('rs_ai_endpoint', endpoint);
+  }catch(e){}
+
+  if(!REPORT){
+    alert('Please run a Smart Audit or load a saved report first before running AI review.');
+    return;
+  }
+
+  AI_RUNNING = true;
+  render();
+
+  try{
+    let resp = await fetch('/api/ai-review?token=' + encodeURIComponent(token), {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        provider: provider,
+        api_key: apiKey,
+        model: model,
+        endpoint: endpoint,
+        redact: redact,
+        report: REPORT
+      })
+    });
+    if(!resp.ok){
+      let errText = await resp.text();
+      throw new Error(errText || 'AI review request failed');
+    }
+    let res = await resp.json();
+    if(!res.ok && res.error){
+      alert('AI Advisor Notice: ' + res.error);
+    }
+    AI_RESULT = res;
+  }catch(err){
+    alert('AI Review error: ' + err.message);
+  }finally{
+    AI_RUNNING = false;
+    render();
+  }
+}
+
+function exportAIReviewMarkdown(){
+  if(!AI_RESULT) return;
+  let r = AI_RESULT;
+  let md = '# ReconSpace AI Audit Advisor - Executive Review\n\n' +
+    '**System Wellness Score:** `' + r.overall_score + '/100`  \n' +
+    '**AI Engine:** `' + r.provider + '` (`' + r.model + '`)  \n' +
+    '**Total Reclaimable Potential:** `' + bytes(r.total_potential_reclaim_bytes||0) + '`  \n\n' +
+    '## Executive Summary\n\n> ' + r.summary_verdict + '\n\n';
+
+  ['critical_actions', 'quick_wins', 'safety_warnings', 'explainers'].forEach(cat => {
+    let items = r[cat] || [];
+    if(!items.length) return;
+    let title = cat === 'critical_actions' ? 'Critical Actions' : (cat === 'quick_wins' ? 'Quick Wins' : (cat === 'safety_warnings' ? 'Safety Warnings' : 'Explainers'));
+    md += '## ' + title + '\n\n';
+    items.forEach(item => {
+      md += '### [' + item.id + '] ' + item.title + '\n';
+      md += '- **Safety:** `' + item.safety_rating + '`' + (item.impact_reclaim_bytes ? ' | **Reclaim:** `' + bytes(item.impact_reclaim_bytes) + '`' : '') + '\n';
+      md += '- **Summary:** ' + item.summary + '\n';
+      if(item.technical_detail) md += '- **Technical Detail:** ' + item.technical_detail + '\n';
+      if(item.suggested_action) md += '- **Action:**\n  ```powershell\n  ' + item.suggested_action + '\n  ```\n';
+      md += '\n';
+    });
+  });
+
+  let blob = new Blob([md], {type: 'text/markdown;charset=utf-8'});
+  let url = URL.createObjectURL(blob);
+  let a = document.createElement('a');
+  a.href = url;
+  a.download = 'reconspace-ai-review.md';
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+}
+
+function exportAIReviewJSON(){
+  if(!AI_RESULT) return;
+  let blob = new Blob([JSON.stringify(AI_RESULT, null, 2)], {type: 'application/json;charset=utf-8'});
+  let url = URL.createObjectURL(blob);
+  let a = document.createElement('a');
+  a.href = url;
+  a.download = 'reconspace-ai-review.json';
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+}
+
+function aiReviewView(){
+  if(!REPORT){
+    return getPreScanHub('ai');
+  }
+
+  let savedKey = localStorage.getItem('rs_ai_key') || '';
+  let savedProvider = localStorage.getItem('rs_ai_provider') || 'heuristic';
+  let savedModel = localStorage.getItem('rs_ai_model') || '';
+  let savedEndpoint = localStorage.getItem('rs_ai_endpoint') || '';
+
+  let html = `
+    <div class="hub-hero">
+      <div class="hub-orb" style="background:linear-gradient(135deg,#2c8394,#65bbcc)">✦</div>
+      <div>
+        <h2>ReconSpace AI Audit Advisor</h2>
+        <p>AI-powered Windows architecture &amp; security review. Triages telemetry, flags developer tooling invariants, detects bloat patterns, and provides verified PowerShell recipes.</p>
+      </div>
+    </div>
+
+    <!-- Configuration Card -->
+    <div class="panel" style="margin-top:20px;padding:20px">
+      <h3 style="margin-top:0;font-size:16px;font-weight:750">AI Advisor Configuration</h3>
+      <div class="grid" style="grid-template-columns:repeat(auto-fit, minmax(220px, 1fr));gap:14px;margin-top:14px">
+        <div>
+          <label style="display:block;font-size:12px;font-weight:600;margin-bottom:4px">AI Engine / Provider</label>
+          <select id="aiProviderSelect" style="width:100%;padding:7px;border-radius:6px;background:var(--card);color:var(--fg);border:1px solid var(--border)" onchange="onAIProviderChange(this.value)">
+            <option value="heuristic" ${savedProvider==='heuristic'?'selected':''}>Offline Heuristic Engine (No Key Required)</option>
+            <option value="openai" ${savedProvider==='openai'?'selected':''}>OpenAI / OpenRouter / Groq</option>
+            <option value="anthropic" ${savedProvider==='anthropic'?'selected':''}>Anthropic Claude</option>
+            <option value="gemini" ${savedProvider==='gemini'?'selected':''}>Google Gemini</option>
+            <option value="ollama" ${savedProvider==='ollama'?'selected':''}>Ollama (Local LLM)</option>
+          </select>
+        </div>
+        <div id="aiKeyBox" style="${savedProvider==='heuristic'||savedProvider==='ollama'?'display:none':''}">
+          <label style="display:block;font-size:12px;font-weight:600;margin-bottom:4px">API Key (Saved locally)</label>
+          <input type="password" id="aiApiKeyInput" value="${esc(savedKey)}" placeholder="sk-..." style="width:100%;padding:7px;border-radius:6px;background:var(--card);color:var(--fg);border:1px solid var(--border)" onchange="localStorage.setItem('rs_ai_key', this.value.trim())">
+        </div>
+        <div id="aiModelBox">
+          <label style="display:block;font-size:12px;font-weight:600;margin-bottom:4px">Model Override (Optional)</label>
+          <input type="text" id="aiModelInput" value="${esc(savedModel)}" placeholder="Default for provider" style="width:100%;padding:7px;border-radius:6px;background:var(--card);color:var(--fg);border:1px solid var(--border)" onchange="localStorage.setItem('rs_ai_model', this.value.trim())">
+        </div>
+        <div id="aiEndpointBox" style="${savedProvider==='heuristic'?'display:none':''}">
+          <label style="display:block;font-size:12px;font-weight:600;margin-bottom:4px">Custom Endpoint (Optional)</label>
+          <input type="text" id="aiEndpointInput" value="${esc(savedEndpoint)}" placeholder="Default provider API URL" style="width:100%;padding:7px;border-radius:6px;background:var(--card);color:var(--fg);border:1px solid var(--border)" onchange="localStorage.setItem('rs_ai_endpoint', this.value.trim())">
+        </div>
+      </div>
+
+      <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px;margin-top:16px;padding-top:14px;border-top:1px solid var(--border)">
+        <label style="display:flex;align-items:center;gap:8px;font-size:12px;cursor:pointer">
+          <input type="checkbox" id="aiRedactToggle" checked>
+          <span><b>Privacy Guard:</b> Sanitize usernames, hostnames, paths, and secrets before prompting</span>
+        </label>
+        <div style="display:flex;gap:10px;flex-wrap:wrap">
+          <button type="button" class="secondary" onclick="copySanitizedPrompt(this)">📋 Copy Sanitized Prompt for Web Chat</button>
+          <button type="button" id="btnRunAI" class="primary" style="background:linear-gradient(135deg,#2c8394,#65bbcc);border:none" onclick="runAIReview()" ${AI_RUNNING?'disabled':''}>
+            ${AI_RUNNING ? '⏳ Analyzing Telemetry...' : '✦ Run AI Audit Review'}
+          </button>
+        </div>
+      </div>
+    </div>
+  `;
+
+  if(AI_RUNNING){
+    html += `
+      <div class="panel" style="margin-top:20px;text-align:center;padding:40px">
+        <div style="font-size:24px;margin-bottom:10px">✦</div>
+        <h3>ReconSpace AI Advisor is Analyzing Your System...</h3>
+        <p class="small">Correlating storage findings, Defender security posture, Win32 RAM loads, open-source intelligence metrics, and developer tooling invariants.</p>
+      </div>
+    `;
+    return html;
+  }
+
+  if(!AI_RESULT){
+    html += `
+      <div class="panel" style="margin-top:20px;padding:30px;text-align:center">
+        <p style="margin:0 0 10px 0;font-size:15px">Click <b>✦ Run AI Audit Review</b> above to generate evidence-based recommendations, quick wins, safety invariants, and architectural explainers.</p>
+        <p class="small">The offline heuristic engine runs instantly without internet access or an API key.</p>
+      </div>
+    `;
+    return html;
+  }
+
+  let res = AI_RESULT;
+  let crit = res.critical_actions || [];
+  let quick = res.quick_wins || [];
+  let warns = res.safety_warnings || [];
+  let expls = res.explainers || [];
+  let all = res.recommendations || (crit.concat(quick, warns, expls));
+
+  let displayed = all;
+  if(AI_CATEGORY_FILTER === 'critical') displayed = crit;
+  else if(AI_CATEGORY_FILTER === 'quick_wins') displayed = quick;
+  else if(AI_CATEGORY_FILTER === 'safety') displayed = warns;
+  else if(AI_CATEGORY_FILTER === 'explainers') displayed = expls;
+
+  let scoreColor = res.overall_score >= 80 ? 'var(--good)' : (res.overall_score >= 60 ? 'var(--warn)' : 'var(--bad)');
+
+  html += `
+    <!-- Results Header / Wellness Score -->
+    <div class="chart" style="margin-top:20px;display:flex;align-items:center;gap:24px;flex-wrap:wrap">
+      <div style="text-align:center;min-width:110px">
+        <div style="font-size:42px;font-weight:800;color:${scoreColor};line-height:1">${res.overall_score}</div>
+        <div class="small" style="font-weight:700;text-transform:uppercase;letter-spacing:0.5px;margin-top:4px">Health Score</div>
+      </div>
+      <div style="flex:1;min-width:260px">
+        <div style="display:flex;align-items:center;gap:10px;margin-bottom:6px">
+          <span class="badge" style="background:#203a43;color:#2af598">Engine: ${esc(res.provider)} (${esc(res.model)})</span>
+          <span class="badge safe">Est. Reclaim: ${bytes(res.total_potential_reclaim_bytes||0)}</span>
+          ${res.sanitization_summary&&res.sanitization_summary.redacted ? '<span class="badge">🛡️ Redacted PII</span>' : ''}
+        </div>
+        <div style="font-size:14px;line-height:1.45;color:var(--fg)">${esc(res.summary_verdict)}</div>
+      </div>
+      <div style="display:flex;gap:8px">
+        <button type="button" class="secondary" style="font-size:11px" onclick="exportAIReviewMarkdown()">Export .MD</button>
+        <button type="button" class="secondary" style="font-size:11px" onclick="exportAIReviewJSON()">Export JSON</button>
+      </div>
+    </div>
+
+    <!-- Category Filter Tabs -->
+    <div style="display:flex;gap:8px;margin-top:20px;flex-wrap:wrap">
+      <button type="button" class="secondary ${AI_CATEGORY_FILTER==='all'?'active':''}" style="${AI_CATEGORY_FILTER==='all'?'background:var(--primary);color:#fff;':''}" onclick="setAICategoryFilter('all')">All Recommendations (${all.length})</button>
+      <button type="button" class="secondary ${AI_CATEGORY_FILTER==='critical'?'active':''}" style="${AI_CATEGORY_FILTER==='critical'?'background:#ef476f;color:#fff;':''}" onclick="setAICategoryFilter('critical')">🚨 Critical Actions (${crit.length})</button>
+      <button type="button" class="secondary ${AI_CATEGORY_FILTER==='quick_wins'?'active':''}" style="${AI_CATEGORY_FILTER==='quick_wins'?'background:#06d6a0;color:#000;':''}" onclick="setAICategoryFilter('quick_wins')">⚡ Quick Wins (${quick.length})</button>
+      <button type="button" class="secondary ${AI_CATEGORY_FILTER==='safety'?'active':''}" style="${AI_CATEGORY_FILTER==='safety'?'background:#118ab2;color:#fff;':''}" onclick="setAICategoryFilter('safety')">🛡️ Safety Warnings (${warns.length})</button>
+      <button type="button" class="secondary ${AI_CATEGORY_FILTER==='explainers'?'active':''}" style="${AI_CATEGORY_FILTER==='explainers'?'background:#2c8394;color:#fff;':''}" onclick="setAICategoryFilter('explainers')">📚 Explainers (${expls.length})</button>
+    </div>
+
+    <!-- Cards List -->
+    <div style="margin-top:16px;display:flex;flex-direction:column;gap:14px">
+      ${displayed.map(r => {
+        let catBadge = r.category === 'critical_action'
+          ? '<span style="background:#ef476f;color:#fff;padding:2px 8px;border-radius:4px;font-size:10px;font-weight:750">CRITICAL</span>'
+          : (r.category === 'quick_win'
+            ? '<span style="background:#06d6a0;color:#000;padding:2px 8px;border-radius:4px;font-size:10px;font-weight:750">QUICK WIN</span>'
+            : (r.category === 'safety_warning'
+              ? '<span style="background:#118ab2;color:#fff;padding:2px 8px;border-radius:4px;font-size:10px;font-weight:750">SAFETY WARNING</span>'
+              : '<span style="background:#2c8394;color:#fff;padding:2px 8px;border-radius:4px;font-size:10px;font-weight:750">EXPLAINER</span>'));
+
+        let safetyBadge = r.safety_rating === 'do_not_touch'
+          ? '<span class="review" style="font-size:11px">DO NOT TOUCH</span>'
+          : (r.safety_rating === 'requires_manual_review'
+            ? '<span class="review" style="font-size:11px">MANUAL REVIEW</span>'
+            : '<span class="safe" style="font-size:11px">HIGH SAFETY</span>');
+
+        return `
+          <div class="panel" style="padding:16px 20px;border-left:4px solid ${r.category==='critical_action'?'#ef476f':(r.category==='quick_win'?'#06d6a0':(r.category==='safety_warning'?'#118ab2':'#2c8394'))}">
+            <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px;flex-wrap:wrap">
+              <div>
+                <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
+                  ${catBadge}
+                  <span class="mono small" style="font-weight:700">${esc(r.id)}</span>
+                  ${safetyBadge}
+                  ${r.impact_reclaim_bytes > 0 ? `<span class="safe" style="font-weight:700;font-size:12px">+${bytes(r.impact_reclaim_bytes)}</span>` : ''}
+                </div>
+                <h4 style="margin:0 0 6px 0;font-size:16px;font-weight:750">${esc(r.title)}</h4>
+              </div>
+            </div>
+            <div style="margin-top:6px;font-size:13px;line-height:1.45;color:var(--fg)">${esc(r.summary)}</div>
+            ${r.technical_detail ? `<div class="small" style="margin-top:8px;color:var(--muted);line-height:1.4"><b>Technical Rationale:</b> ${esc(r.technical_detail)}</div>` : ''}
+            ${r.suggested_action ? `
+              <div class="recipe-box" style="margin-top:10px">
+                <span class="recipe-code">${esc(r.suggested_action)}</span>
+                <button type="button" class="secondary" style="font-size:11px;padding:3px 8px" onclick="copyPath(this, '${esc(r.suggested_action).replace(/'/g, "\\'")}')">Copy</button>
+              </div>
+            ` : ''}
+            ${r.affected_paths && r.affected_paths.length ? `
+              <div style="margin-top:10px;display:flex;gap:6px;flex-wrap:wrap">
+                ${r.affected_paths.map(p => `<span class="badge mono" style="font-size:10px">${esc(p)}</span>`).join('')}
+              </div>
+            ` : ''}
+          </div>
+        `;
+      }).join('')}
+    </div>
+  `;
+
+  return html;
+}
+
 function render(){
   if(!REPORT)return;
   let v=currentView,h='';
@@ -2514,6 +2818,7 @@ function render(){
   else if(v==='applications_hub')h=applicationsHub();
   else if(v==='clutter_hub')h=clutterHub();
   else if(v==='plan')h=actionPlan();
+  else if(v==='ai_review')h=aiReviewView();
   else if(v==='findings')h=findings();
   else if(v==='dirs')h=simpleTable(REPORT.top_directories||[],[['Size',x=>bytes(x.size_bytes)],['Direct files',x=>bytes(x.direct_size_bytes)],['Path',x=>esc(x.path),'pathcell']]);
   else if(v==='files')h=simpleTable(REPORT.top_files||[],[['Logical',x=>bytes(x.size_bytes)],['Allocated',x=>x.allocated_bytes==null?'Unknown':bytes(x.allocated_bytes)],['Type',x=>esc(x.extension||'(none)')],['Modified',x=>x.modified_ts?new Date(x.modified_ts*1000).toLocaleString():''],['Links',x=>String(x.link_count||1)],['Path',x=>esc(x.path),'pathcell']]);
@@ -2537,6 +2842,8 @@ function render(){
   let selEnd=document.activeElement?document.activeElement.selectionEnd:null;
 
   $('#view').innerHTML=h;
+  if(v==='clutter_hub')bindSpaceLens();
+  $$('#view .hub-orb').forEach(el=>{el.innerHTML=cmmIcon(currentPage==='cleanup'?'clean':currentPage,48);});
 
   if(v==='plan'){
     let planExport=$('#planExportInline');
@@ -2581,10 +2888,14 @@ async function poll(){
       $('#heartbeatText').textContent=s.running?'Engine Active':'Engine Standby';
     }
 
-    $('#scan').disabled=s.running;
-    $('#cancel').disabled=!s.running;
+    const running=s.running||scanSubmitting;
+    $('#scan').disabled=running;
+    $('#cancel').disabled=!s.running||s.progress?.phase==='cancelling';
+    $('#cancelSpotlight').disabled=$('#cancel').disabled;
+    if(scanRunning!==running){scanRunning=running;navigatePage(currentPage,false);}
 
     let p=s.progress||{},phase=p.phase||'idle';
+    if(s.running)CareMotion.phaseArtwork(phase.includes('duplicate')?'clutter':phase.includes('trust')||phase.includes('permission')?'protection':phase.includes('process')?'performance':phase.includes('application')||phase.includes('startup')?'applications':phase.includes('filesystem')?'cleanup':'home');
     let stageIdx=getStageIndex(phase);
     updatePipelineStepper(stageIdx,s.running);
 
@@ -2660,6 +2971,10 @@ async function poll(){
       headline='Audit Cancelled by User';
       detail='Audit was safely interrupted before modifying any state.';
       text='Audit cancelled';
+    }else if(phase==='cancelling'){
+      headline='Stopping safely after the current check…';
+      detail='A Windows collector may need to finish or time out before the audit stops.';
+      text='Cancelling audit…';
     }else if(phase==='failed'){
       headline='Audit Failed';
       detail=s.error||'An unexpected error occurred during execution.';
@@ -2667,6 +2982,8 @@ async function poll(){
     }
 
     $('#status').textContent=text;
+    $('#scanPhase').textContent=headline;
+    $('#scanHeadline').textContent='A little care, in progress.';
     $('#activeDetailText').textContent=detail?`${headline} — ${detail}`:headline;
 
     // Status pill state
@@ -2718,13 +3035,17 @@ async function poll(){
 
     if(s.error)showError(s.error);
 
-    if(s.has_report&&!REPORT){
+    if(s.has_report&&!REPORT&&!running){
       let reportResponse=await fetch('/api/report',{cache:'no-store',credentials:'omit',headers:{'X-ReconSpace-Token':token}});
       if(!reportResponse.ok)throw new Error(`Report request failed (${reportResponse.status}).`);
       REPORT=await reportResponse.json();
-      $('#summary').classList.remove('hidden');
+      $('#scanComposer').classList.remove('scanning-active');
+      renderCareResults();
       renderMetrics();
       navigatePage(currentPage,false);
+      if($('#autoAiReview') && $('#autoAiReview').checked){
+        runAIReview();
+      }
     }
   }catch(e){
     pollFailures++;
@@ -2741,6 +3062,7 @@ async function poll(){
 }
 
 $('#scan').onclick=async()=>{
+  if(scanRunning)return;
   let root=$('#root').value.trim().replace(/^["']|["']$/g,'').trim();
   if(!root){
     showError('Enter a local drive or folder to scan.');
@@ -2753,6 +3075,12 @@ $('#scan').onclick=async()=>{
   clearError();
   $('#scan').disabled=true;
   $('#status').textContent='Submitting audit…';
+  $('#scanPhase').textContent='Preparing your audit…';
+  $('#statusBadgeText').textContent='Preparing';
+  $('#scanComposer').classList.add('scanning-active');
+  scanRunning=true;
+  scanSubmitting=true;
+  navigatePage('home');
   scanStartTime=Date.now();
   activityEventsCount=0;
   $('#activityFeed').innerHTML='';
@@ -2776,13 +3104,20 @@ $('#scan').onclick=async()=>{
   try{
     let r=await fetch('/api/scan',{method:'POST',credentials:'omit',headers:{'Content-Type':'application/json','X-ReconSpace-Token':token},body:JSON.stringify(body)});
     if(!r.ok)throw new Error(await r.text());
+    scanSubmitting=false;
     $('#status').textContent='Audit queued…';
+    $('#cancel').disabled=false;
+    $('#cancelSpotlight').disabled=false;
     logActivity('Audit received and queued by engine', 'item');
   }catch(e){
+    scanSubmitting=false;
     showError(e.message||'Could not start the audit.');
     $('#status').textContent='Audit did not start';
     $('#scan').disabled=false;
     scanStartTime=null;
+    scanRunning=false;
+    $('#scanComposer').classList.remove('scanning-active');
+    navigatePage('settings');
   }
 };
 
@@ -2791,6 +3126,8 @@ $('#cancel').onclick=async()=>{
     let r=await fetch('/api/cancel',{method:'POST',credentials:'omit',headers:{'X-ReconSpace-Token':token}});
     if(!r.ok)throw new Error(await r.text());
     $('#status').textContent='Cancelling audit…';
+    $('#scanPhase').textContent='Stopping safely after the current check…';
+    $('#cancelSpotlight').disabled=true;
     logActivity('Cancellation signal sent to engine...', 'stage');
   }catch(e){
     showError(e.message||'Could not cancel the audit.');
@@ -2800,7 +3137,7 @@ $('#cancel').onclick=async()=>{
 function initTabs(){
   let tabs=[...$$('.tab')];
   let tablist=$('.tabs');
-  let syncOrientation=()=>tablist.setAttribute('aria-orientation',matchMedia('(max-width:760px)').matches?'horizontal':'vertical');
+  let syncOrientation=()=>tablist.setAttribute('aria-orientation','horizontal');
   syncOrientation();
   addEventListener('resize',syncOrientation,{passive:true});
   tabs.forEach((button,index)=>{
@@ -2809,20 +3146,25 @@ function initTabs(){
     button.setAttribute('tabindex',index===0?'0':'-1');
     button.onclick=()=>switchTab(button.dataset.view);
     button.onkeydown=event=>{
+      const visible=tabs.filter(t=>!t.classList.contains('hidden'));
+      const position=visible.indexOf(button);
       let delta=event.key==='ArrowDown'||event.key==='ArrowRight'?1:event.key==='ArrowUp'||event.key==='ArrowLeft'?-1:0;
-      let target=event.key==='Home'?0:event.key==='End'?tabs.length-1:delta?(index+delta+tabs.length)%tabs.length:-1;
+      let target=event.key==='Home'?0:event.key==='End'?visible.length-1:delta?(position+delta+visible.length)%visible.length:-1;
       if(target<0)return;
       event.preventDefault();
-      switchTab(tabs[target].dataset.view);
-      tabs[target].focus();
+      switchTab(visible[target].dataset.view);
+      visible[target].focus();
     };
   });
 }
 
 $$('button[data-page]').forEach(button=>button.addEventListener('click',()=>navigatePage(button.dataset.page)));
+$$('.rail-item').forEach(button=>{const icon=button.querySelector('.rail-icon');if(icon)icon.innerHTML=cmmIcon(button.dataset.page==='home'?'smart':button.dataset.page,26);});
+$('#scanOrbitIcon').innerHTML=careArtwork('home');
 $$('.care-tile').forEach((tile,index)=>{
-  const page=['cleanup','protection','performance','applications','clutter'][index];
+  const page=['cleanup','protection','performance','applications','clutter','ai'][index];
   tile.setAttribute('role','button');tile.setAttribute('tabindex','0');
+  tile.querySelector('.care-tile-icon').innerHTML=careArtwork(page);
   tile.onclick=()=>navigatePage(page);
   tile.onkeydown=event=>{if(event.key==='Enter'||event.key===' '){event.preventDefault();navigatePage(page);}};
 });
@@ -2892,13 +3234,55 @@ $('#export').onclick=()=>{
   setTimeout(()=>URL.revokeObjectURL(a.href),1000);
 };
 
+function startAuditWithAI(){
+  if($('#autoAiReview')) $('#autoAiReview').checked = true;
+  let prov = $('#aiProviderSelectPre') ? $('#aiProviderSelectPre').value : '';
+  let key = $('#aiApiKeyInputPre') ? $('#aiApiKeyInputPre').value.trim() : '';
+  let mod = $('#aiModelInputPre') ? $('#aiModelInputPre').value.trim() : '';
+  let ep = $('#aiEndpointInputPre') ? $('#aiEndpointInputPre').value.trim() : '';
+  try{
+    if(prov) localStorage.setItem('rs_ai_provider', prov);
+    if(key) localStorage.setItem('rs_ai_key', key);
+    if(mod) localStorage.setItem('rs_ai_model', mod);
+    if(ep) localStorage.setItem('rs_ai_endpoint', ep);
+  }catch(e){}
+  navigatePage('home');
+  $('#scan').click();
+}
+
+async function handleReportImport(e){
+  let file = e.target.files && e.target.files[0];
+  if(!file) return;
+  if(file.size > MAX_IMPORTED_REPORT_BYTES){
+    alert('Report file is too large (max 64MB)');
+    return;
+  }
+  try{
+    let text = await file.text();
+    let imported = validateImportedReport(JSON.parse(text));
+    REPORT = imported;
+    $('#scanComposer').classList.remove('scanning-active');
+    $('#summary').classList.remove('hidden');
+    renderMetrics();
+    renderCareResults();
+    navigatePage(currentPage === 'home' || currentPage === 'settings' ? 'home' : currentPage, false);
+    if(currentPage === 'ai'){
+      switchTab('ai_review');
+    }
+  }catch(err){
+    alert('Failed to load report: ' + err.message);
+  }finally{
+    e.target.value = '';
+  }
+}
+
 $('#profile').onchange=profileHint;
 initTabs();
 profileHint();
 poll();
 </script>
 </body>
-</html>'''.replace("__PROFILES__", profiles).replace("__VERSION__", __version__)
+</html>'''.replace("__PROFILES__", profiles).replace("__VERSION__", __version__).replace("__CARE_CSS__", "\n".join(files("reconspace").joinpath("assets", name).read_text(encoding="utf-8") for name in ("care.css", "experience.css"))).replace("__CARE_MOTION__", files("reconspace").joinpath("assets/care-motion.js").read_text(encoding="utf-8")).replace("__SPACE_LENS__", files("reconspace").joinpath("assets/space-lens.js").read_text(encoding="utf-8"))
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -2940,6 +3324,13 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:
         parsed = urlparse(self.path)
+        if parsed.path in {f"/assets/care-{name}.png" for name in ("desktop", "storage", "protection", "performance", "applications", "clutter")}:
+            payload = files("reconspace").joinpath("assets", parsed.path.rsplit("/", 1)[-1]).read_bytes()
+            self.send_response(200)
+            self._headers("image/png", len(payload))
+            self.end_headers()
+            self.wfile.write(payload)
+            return
         if parsed.path == "/":
             payload = _html().encode("utf-8")
             self.send_response(200)
@@ -2961,6 +3352,15 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 self._send_json(report)
             return
+        if parsed.path == "/api/ai-prompt":
+            with STATE.lock:
+                report = STATE.report
+            if report is None:
+                report = _sample_preview_report()
+            sys_prompt, user_prompt, summary = build_advisor_prompt(report, redact=True)
+            combined = f"--- SYSTEM PROMPT ---\n{sys_prompt}\n\n--- USER PROMPT ---\n{user_prompt}\n"
+            self._send_json({"prompt": combined, "sanitization": summary})
+            return
         self._send_json({"error": "not found"}, 404)
 
     def do_POST(self) -> None:
@@ -2977,6 +3377,59 @@ class Handler(BaseHTTPRequestHandler):
                     STATE.progress = {"phase": "cancelling"}
             self._send_json({"ok": True, "running": running}, 202 if running else 200)
             return
+
+        if parsed.path == "/api/ai-prompt":
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+                body = json.loads(self.rfile.read(length) or b"{}", parse_constant=_reject_json_constant) if length > 0 else {}
+                custom_report = body.get("report") if isinstance(body, dict) else None
+                if custom_report is None:
+                    with STATE.lock:
+                        custom_report = STATE.report
+                if custom_report is None:
+                    custom_report = _sample_preview_report()
+                sys_prompt, user_prompt, summary = build_advisor_prompt(custom_report, redact=True)
+                combined = f"--- SYSTEM PROMPT ---\n{sys_prompt}\n\n--- USER PROMPT ---\n{user_prompt}\n"
+                self._send_json({"prompt": combined, "sanitization": summary})
+                return
+            except Exception as exc:
+                self._send_json({"ok": False, "error": str(exc)}, 500)
+                return
+
+        if parsed.path == "/api/ai-review":
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+                if length < 0 or length > 50 * 1024 * 1024:
+                    self._send_text("request body too large", 413)
+                    return
+                body = json.loads(self.rfile.read(length) or b"{}", parse_constant=_reject_json_constant)
+                if not isinstance(body, dict):
+                    self._send_text("request body must be a JSON object", 400)
+                    return
+                custom_report = body.get("report")
+                if custom_report is None:
+                    with STATE.lock:
+                        custom_report = STATE.report
+                if not custom_report or not isinstance(custom_report, dict):
+                    self._send_text("no report available to review", 400)
+                    return
+                provider = str(body.get("provider") or "heuristic")
+                api_key = str(body.get("api_key") or "")
+                model = str(body.get("model") or "")
+                endpoint = str(body.get("endpoint") or "")
+                redact = bool(body.get("redact", True))
+                cfg = AIProviderConfig(
+                    provider=provider,
+                    api_key=api_key,
+                    model=model,
+                    endpoint=endpoint,
+                )
+                result = query_ai_advisor(custom_report, config=cfg, redact=redact)
+                self._send_json(ai_review_to_json(result))
+                return
+            except Exception as exc:
+                self._send_json({"ok": False, "error": str(exc)}, 500)
+                return
 
         if parsed.path != "/api/scan":
             self._send_json({"error": "not found"}, 404)
@@ -3127,7 +3580,14 @@ class LocalThreadingHTTPServer(ThreadingHTTPServer):
 def serve(host: str = "127.0.0.1", port: int = 8765, open_browser: bool = True) -> None:
     if host not in {"127.0.0.1", "localhost", "::1"}:
         raise ValueError("ReconSpace UI intentionally binds only to loopback/localhost")
-    server = LocalThreadingHTTPServer((host, port), Handler)
+    try:
+        server = LocalThreadingHTTPServer((host, port), Handler)
+    except OSError as error:
+        # Windows exclusive/reserved ports may report WSAEACCES rather than address-in-use.
+        if error.errno not in {errno.EADDRINUSE, errno.EACCES} and getattr(error, "winerror", None) not in {10048, 10013}:
+            raise
+        server = LocalThreadingHTTPServer((host, 0), Handler)
+        print(f"Port {port} is unavailable; opened ReconSpace on a free local port instead.")
     actual_host, actual_port = server.server_address[:2]
     shown_host = "127.0.0.1" if actual_host in {"0.0.0.0", "::"} else actual_host
     url = f"http://{shown_host}:{actual_port}/?token={TOKEN}"

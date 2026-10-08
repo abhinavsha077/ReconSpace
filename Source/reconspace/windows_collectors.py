@@ -1481,6 +1481,389 @@ def _drive_for_root(root: str) -> str:
     return m.group(0) if m else cleaned
 
 
+def collect_hibernation_pagefile_intelligence(root: str = "C:\\") -> CollectorResult:
+    """Audit Windows hibernation (hiberfil.sys) and pagefile/swapfile sizing and optimization potential."""
+    if not IS_WINDOWS:
+        return CollectorResult(name="hibernation_pagefile_intelligence", ok=False, error="Windows-only collector", applicable=False)
+    drive = _drive_for_root(root) or "C:"
+    drive_root = drive.rstrip("\\") + "\\"
+
+    hiber_path = os.path.join(drive_root, "hiberfil.sys")
+    page_path = os.path.join(drive_root, "pagefile.sys")
+    swap_path = os.path.join(drive_root, "swapfile.sys")
+
+    hiber_size = 0
+    hiber_exists = False
+    if os.path.exists(hiber_path):
+        try:
+            hiber_size = os.path.getsize(hiber_path)
+            hiber_exists = True
+        except OSError:
+            hiber_exists = True
+
+    page_size = 0
+    page_exists = False
+    if os.path.exists(page_path):
+        try:
+            page_size = os.path.getsize(page_path)
+            page_exists = True
+        except OSError:
+            page_exists = True
+
+    swap_size = 0
+    swap_exists = False
+    if os.path.exists(swap_path):
+        try:
+            swap_size = os.path.getsize(swap_path)
+            swap_exists = True
+        except OSError:
+            swap_exists = True
+
+    hiber_enabled = None
+    hiber_type = None  # 0 = reduced, 1 = full
+    try:
+        import winreg
+        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"SYSTEM\CurrentControlSet\Control\Power") as key:
+            try:
+                hiber_enabled, _ = winreg.QueryValueEx(key, "HibernateEnabled")
+            except OSError:
+                pass
+            try:
+                hiber_type, _ = winreg.QueryValueEx(key, "HiberFileType")
+            except OSError:
+                pass
+    except Exception:
+        pass
+
+    hiber_mode_desc = "Unknown"
+    potential_savings_bytes = 0
+    if hiber_exists and hiber_size > 0:
+        if hiber_type == 0:
+            hiber_mode_desc = "Reduced (kernel context only; saves ~50% RAM while enabling Fast Startup)"
+            potential_savings_bytes = 0
+        elif hiber_type == 1 or hiber_type is None:
+            hiber_mode_desc = "Full (100% RAM allocation for hybrid sleep / deep hibernate)"
+            potential_savings_bytes = int(hiber_size * 0.5)
+    elif not hiber_exists:
+        hiber_mode_desc = "Disabled (Fast Startup and Hibernate inactive)"
+
+    recipes = {
+        "switch_reduced": "powercfg.exe /hibernate /type reduced",
+        "disable_hibernate": "powercfg.exe /hibernate off",
+        "enable_full": "powercfg.exe /hibernate /type full",
+    }
+
+    return CollectorResult(
+        name="hibernation_pagefile_intelligence",
+        ok=True,
+        data={
+            "drive": drive,
+            "hiberfil_exists": hiber_exists,
+            "hiberfil_bytes": hiber_size,
+            "pagefile_exists": page_exists,
+            "pagefile_bytes": page_size,
+            "swapfile_exists": swap_exists,
+            "swapfile_bytes": swap_size,
+            "hibernate_enabled": bool(hiber_enabled) if hiber_enabled is not None else hiber_exists,
+            "hiber_file_type": "reduced" if hiber_type == 0 else ("full" if hiber_type == 1 else "unknown"),
+            "mode_description": hiber_mode_desc,
+            "potential_reduced_savings_bytes": potential_savings_bytes,
+            "recipes": recipes,
+        },
+    )
+
+
+def collect_delivery_optimization_status() -> CollectorResult:
+    """Audit Windows Delivery Optimization P2P telemetry, cache metrics, and bandwidth conservation."""
+    if not IS_WINDOWS:
+        return CollectorResult(name="delivery_optimization_status", ok=False, error="Windows-only collector", applicable=False)
+
+    ps_cmd = (
+        "$snap = try { Get-DeliveryOptimizationPerfSnap -ErrorAction Stop | Select-Object -First 1 "
+        "BytesFromPeers,BytesFromHttp,BytesUploadedToPeers,PercentPeerCaching,CacheSizeBytes } catch { $null }; "
+        "$mode = try { (Get-ItemProperty -Path 'HKLM:\\SOFTWARE\\Policies\\Microsoft\\Windows\\DeliveryOptimization' -ErrorAction SilentlyContinue).DODownloadMode } catch { $null }; "
+        "[PSCustomObject]@{Snap=$snap; PolicyMode=$mode} | ConvertTo-Json -Compress"
+    )
+    result = _powershell_json(ps_cmd, "delivery_optimization_status", timeout=45)
+    data = result.data if result.ok and isinstance(result.data, dict) else {}
+    snap = data.get("Snap") or {}
+    policy_mode = data.get("PolicyMode")
+
+    cache_size = snap.get("CacheSizeBytes") or 0
+    from_peers = snap.get("BytesFromPeers") or 0
+    from_http = snap.get("BytesFromHttp") or 0
+    uploaded_peers = snap.get("BytesUploadedToPeers") or 0
+    peer_caching_pct = snap.get("PercentPeerCaching")
+
+    if not cache_size:
+        sysroot = os.environ.get("SystemRoot", "C:\\Windows")
+        do_path = os.path.join(sysroot, "ServiceProfiles", "NetworkService", "AppData", "Local", "Microsoft", "Windows", "DeliveryOptimization", "Cache")
+        if os.path.isdir(do_path):
+            total = 0
+            try:
+                for root_dir, _, filenames in os.walk(do_path):
+                    for fn in filenames:
+                        try:
+                            total += os.path.getsize(os.path.join(root_dir, fn))
+                        except OSError:
+                            pass
+                cache_size = total
+            except Exception:
+                pass
+
+    mode_map = {
+        0: "HTTP only (no peer-to-peer)",
+        1: "LAN peers only (local network)",
+        2: "Group peers (Active Directory / domain)",
+        3: "Internet peers (uploads/downloads across public web)",
+        99: "Bypass (Direct WSUS/CDN download)",
+    }
+    mode_str = mode_map.get(policy_mode, "Default (LAN / Cloud peering)")
+
+    return CollectorResult(
+        name="delivery_optimization_status",
+        ok=True,
+        data={
+            "cache_size_bytes": cache_size,
+            "bytes_from_peers": from_peers,
+            "bytes_from_http": from_http,
+            "bytes_uploaded_to_peers": uploaded_peers,
+            "peer_caching_pct": peer_caching_pct,
+            "download_mode": mode_str,
+            "purge_recipe": "Delete-DeliveryOptimizationCache",
+            "restrict_p2p_recipe": "Set-ItemProperty -Path 'HKLM:\\SOFTWARE\\Policies\\Microsoft\\Windows\\DeliveryOptimization' -Name DODownloadMode -Value 0 -Type DWord",
+        },
+    )
+
+
+def collect_battery_power_health() -> CollectorResult:
+    """Collect laptop battery health, design vs full capacity, wear level, and charging metrics via Win32_Battery."""
+    if not IS_WINDOWS:
+        return CollectorResult(name="battery_power_health", ok=False, error="Windows-only collector", applicable=False)
+
+    ps_cmd = (
+        "$bat = Get-CimInstance Win32_Battery -ErrorAction SilentlyContinue | Select-Object -First 1 Name,DeviceID,EstimatedChargeRemaining,EstimatedRunTime,BatteryStatus,DesignCapacity,FullChargeCapacity; "
+        "if ($bat) { $bat | ConvertTo-Json -Compress } else { 'null' }"
+    )
+    res = _powershell_json(ps_cmd, "battery_power_health", timeout=30)
+    if not res.ok or not res.data:
+        return CollectorResult(
+            name="battery_power_health",
+            ok=True,
+            applicable=False,
+            data={
+                "is_battery_present": False,
+                "message": "Desktop workstation / AC line power (no battery detected)",
+            },
+        )
+    b = res.data
+    charge_remaining = b.get("EstimatedChargeRemaining")
+    run_time = b.get("EstimatedRunTime")
+    design_cap = b.get("DesignCapacity")
+    full_cap = b.get("FullChargeCapacity")
+    status_code = b.get("BatteryStatus")
+
+    status_map = {
+        1: "Discharging",
+        2: "AC connected (charging or full)",
+        3: "Fully Charged",
+        4: "Low",
+        5: "Critical",
+        6: "Charging",
+        7: "Charging and High",
+        8: "Charging and Low",
+        9: "Charging and Critical",
+        10: "Undefined",
+        11: "Partially Charged",
+    }
+    status_text = status_map.get(status_code, "Active")
+
+    wear_pct = None
+    if design_cap and full_cap and design_cap > 0:
+        wear_pct = max(0.0, round(((design_cap - full_cap) / design_cap) * 100.0, 1))
+
+    return CollectorResult(
+        name="battery_power_health",
+        ok=True,
+        data={
+            "is_battery_present": True,
+            "device_name": b.get("Name", "Primary Battery"),
+            "charge_percent": charge_remaining,
+            "status": status_text,
+            "estimated_runtime_minutes": run_time if (run_time and run_time < 71582788) else None,
+            "design_capacity_mwh": design_cap,
+            "full_charge_capacity_mwh": full_cap,
+            "wear_level_percent": wear_pct,
+            "battery_report_recipe": "powercfg /batteryreport /output $HOME\\battery-report.html",
+        },
+    )
+
+
+def collect_network_adapters_telemetry() -> CollectorResult:
+    """Collect active network adapters, link speeds, connection state, and hardware media types."""
+    if not IS_WINDOWS:
+        return CollectorResult(name="network_adapters_telemetry", ok=False, error="Windows-only collector", applicable=False)
+
+    ps_cmd = (
+        "Get-NetAdapter -ErrorAction SilentlyContinue | Select-Object Name,InterfaceDescription,Status,LinkSpeed,PhysicalMediaType,MacAddress | ConvertTo-Json -Depth 3 -Compress"
+    )
+    res = _powershell_json(ps_cmd, "network_adapters_telemetry", timeout=30)
+    raw = res.data if res.ok and res.data else []
+    if isinstance(raw, dict):
+        raw = [raw]
+    adapters = []
+    up_count = 0
+    for a in raw:
+        if not isinstance(a, dict):
+            continue
+        status = str(a.get("Status") or "Unknown")
+        is_up = status.lower() == "up"
+        if is_up:
+            up_count += 1
+        adapters.append({
+            "name": a.get("Name", ""),
+            "description": a.get("InterfaceDescription", ""),
+            "status": status,
+            "is_up": is_up,
+            "link_speed": a.get("LinkSpeed", ""),
+            "media_type": a.get("PhysicalMediaType", ""),
+            "mac_address": a.get("MacAddress", ""),
+        })
+
+    return CollectorResult(
+        name="network_adapters_telemetry",
+        ok=True,
+        data={
+            "adapters": adapters,
+            "active_adapters_count": up_count,
+            "total_adapters_count": len(adapters),
+        },
+    )
+
+
+def collect_crash_dumps_inventory() -> CollectorResult:
+    """Inventory Windows crash dumps (MEMORY.DMP, Minidump, WER user-mode crash dumps) with zero deletion."""
+    if not IS_WINDOWS:
+        return CollectorResult(name="crash_dumps_inventory", ok=False, error="Windows-only collector", applicable=False)
+
+    sysroot = os.environ.get("SystemRoot", "C:\\Windows")
+    localapp = os.environ.get("LOCALAPPDATA", "")
+
+    candidates = [
+        os.path.join(sysroot, "MEMORY.DMP"),
+    ]
+    minidump_dir = os.path.join(sysroot, "Minidump")
+    if os.path.isdir(minidump_dir):
+        try:
+            for fn in os.listdir(minidump_dir):
+                if fn.lower().endswith(".dmp"):
+                    candidates.append(os.path.join(minidump_dir, fn))
+        except OSError:
+            pass
+
+    crashdumps_dir = os.path.join(localapp, "CrashDumps") if localapp else ""
+    if crashdumps_dir and os.path.isdir(crashdumps_dir):
+        try:
+            for fn in os.listdir(crashdumps_dir):
+                if fn.lower().endswith(".dmp"):
+                    candidates.append(os.path.join(crashdumps_dir, fn))
+        except OSError:
+            pass
+
+    dumps = []
+    total_bytes = 0
+    for path in candidates:
+        if os.path.isfile(path):
+            try:
+                sz = os.path.getsize(path)
+                mtime = os.path.getmtime(path)
+                total_bytes += sz
+                dumps.append({
+                    "path": path,
+                    "filename": os.path.basename(path),
+                    "size_bytes": sz,
+                    "modified_ts": mtime,
+                })
+            except OSError:
+                pass
+
+    dumps.sort(key=lambda x: x["size_bytes"], reverse=True)
+
+    return CollectorResult(
+        name="crash_dumps_inventory",
+        ok=True,
+        data={
+            "total_dumps_count": len(dumps),
+            "total_size_bytes": total_bytes,
+            "dumps": dumps[:25],
+            "recipe_inspect": "Get-ChildItem -Path '$env:LOCALAPPDATA\\CrashDumps', '$env:SystemRoot\\Minidump' -Filter *.dmp",
+        },
+    )
+
+
+def collect_recycle_bin_metrics(root: str = "C:\\") -> CollectorResult:
+    """Query Windows Recycle Bin exact item count and allocated bytes per volume via Win32 Shell API."""
+    if not IS_WINDOWS:
+        return CollectorResult(name="recycle_bin_metrics", ok=False, error="Windows-only collector", applicable=False)
+    drive = _drive_for_root(root) or "C:"
+    drive_root = drive.rstrip("\\") + "\\"
+
+    try:
+        import ctypes
+        import ctypes.wintypes
+
+        class SHQUERYRBINFO(ctypes.Structure):
+            _fields_ = [
+                ("cbSize", ctypes.wintypes.DWORD),
+                ("i64Size", ctypes.c_int64),
+                ("i64NumItems", ctypes.c_int64),
+            ]
+
+        info = SHQUERYRBINFO()
+        info.cbSize = ctypes.sizeof(SHQUERYRBINFO)
+        res = ctypes.windll.shell32.SHQueryRecycleBinW(drive_root, ctypes.byref(info))
+        if res == 0:
+            return CollectorResult(
+                name="recycle_bin_metrics",
+                ok=True,
+                data={
+                    "drive": drive,
+                    "total_size_bytes": max(0, int(info.i64Size)),
+                    "item_count": max(0, int(info.i64NumItems)),
+                    "inspect_recipe": f"Get-ChildItem -Path '{drive_root}$Recycle.Bin' -Force -Recurse -ErrorAction SilentlyContinue | Measure-Object -Property Length -Sum",
+                },
+            )
+    except Exception:
+        pass
+
+    recycle_dir = os.path.join(drive_root, "$Recycle.Bin")
+    if os.path.isdir(recycle_dir):
+        total_sz = 0
+        items = 0
+        try:
+            for r, _, fns in os.walk(recycle_dir):
+                for f in fns:
+                    items += 1
+                    try:
+                        total_sz += os.path.getsize(os.path.join(r, f))
+                    except OSError:
+                        pass
+            return CollectorResult(
+                name="recycle_bin_metrics",
+                ok=True,
+                data={
+                    "drive": drive,
+                    "total_size_bytes": total_sz,
+                    "item_count": items,
+                    "inspect_recipe": f"Get-ChildItem -Path '{drive_root}$Recycle.Bin' -Force -Recurse -ErrorAction SilentlyContinue | Measure-Object -Property Length -Sum",
+                },
+            )
+        except Exception:
+            pass
+
+    return CollectorResult(name="recycle_bin_metrics", ok=False, error="Failed to query Recycle Bin metrics")
+
+
 def collect_optional_system_inventory(
     root: str = "C:\\",
     profile: str = "deep",
@@ -1608,6 +1991,12 @@ def collect_optional_system_inventory(
         ("extended_persistence", lambda: collect_extended_persistence()),
         ("alternate_data_streams", lambda: collect_alternate_data_streams(root=root)),
         ("windows_update_cache", lambda: collect_windows_update_cache()),
+        ("hibernation_pagefile_intelligence", lambda: collect_hibernation_pagefile_intelligence(root=root)),
+        ("delivery_optimization_status", lambda: collect_delivery_optimization_status()),
+        ("battery_power_health", lambda: collect_battery_power_health()),
+        ("network_adapters_telemetry", lambda: collect_network_adapters_telemetry()),
+        ("crash_dumps_inventory", lambda: collect_crash_dumps_inventory()),
+        ("recycle_bin_metrics", lambda: collect_recycle_bin_metrics(root=root)),
     )
 
     has_drive_collectors = bool(drive and re.match(r"^[A-Za-z]:$", drive))

@@ -3,11 +3,13 @@
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
 [![Platform](https://img.shields.io/badge/platform-Windows%2010%20%7C%2011-lightgrey.svg)](https://www.microsoft.com/windows)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-140%20passed-brightgreen.svg)](Source/TEST_REPORT.md)
+[![Tests](https://img.shields.io/badge/tests-165%20passed-brightgreen.svg)](Source/qa/care-13-report.md)
 [![Privacy](https://img.shields.io/badge/telemetry-0%25%20(local%20only)-blueviolet.svg)](SECURITY.md)
 [![Safety Model](https://img.shields.io/badge/safety-read--only%20core%20%2B%20reversible%20recycle%20bin-success.svg)](Source/SAFETY.md)
 
 **ReconSpace** is an advanced, transparent, and principled **Windows storage observatory, system audit, persistence, and developer-tooling reconnaissance suite**. It is designed for engineers, cybersecurity specialists, developers, and power users who need deep visibility into their machines without the risks of black-box "PC cleaners" or destructive registry wipers.
+
+Current runnable build: **1.3.0 Glass & Motion UI** — graphite, icy blue and mint; original 3D module artwork; graphic-led welcome/scan/results; linked storage bubbles; coordinated parallax and zoom/fade transitions; refresh-safe sessions and reduced-motion preferences. Run `run_reconspace.bat` from this directory. Close older app/server sessions first. Latest portable builds are in `Releases`; historical builds are recoverably archived under `Archives`. Design plan: [CARE_EXPERIENCE_PLAN.md](Source/CARE_EXPERIENCE_PLAN.md).
 
 ReconSpace synthesizes the guided ergonomics of modern system care tools with strict, forensic-grade engineering: **read-only observation by default, zero telemetry, non-overlapping reclaim math, deep developer context, and cryptographic execution safety**.
 
@@ -38,6 +40,12 @@ ReconSpace synthesizes the guided ergonomics of modern system care tools with st
 - **WinGet Catalog Correlation**: Discovers installed applications and surfaces available version upgrades directly from the Windows Package Manager.
 - **Browser Footprint & Extension Audits**: Profiles cache and database sizes across Chrome, Edge, Brave, and Firefox; scans extension manifests for high-risk permissions (`<all_urls>`, `webRequest`, `nativeMessaging`).
 - **Developer Tooling Awareness**: Native recognition of Python venvs, Conda, Node (`node_modules`), Docker containers/images/build caches, WSL distributions (`ext4.vhdx`), Hyper-V/VirtualBox VMs, Gradle, Maven, Cargo, Go, HuggingFace model weights, PCAPs, and forensic images.
+
+### 5. 🤖 AI Audit Advisor & Intelligent Review
+- **Multi-Provider AI Review**: Synthesizes full system audit reports using OpenAI, Anthropic, Gemini, or local private models (Ollama).
+- **Zero-Leakage Privacy Redaction**: Automatically sanitizes usernames, personal directories, and sensitive tokens before sending prompts.
+- **Structured Recommendations**: Generates categorized insights: Critical Security Warnings, Quick Cleanup Wins, Performance Optimizations, and Explanations.
+- **Web Dashboard & CLI Integration**: Trigger AI reviews directly from the interactive web dashboard or export via `reconspace ai-review`.
 
 ---
 
@@ -89,10 +97,18 @@ Export a self-contained, no-script HTML evidence dossier:
 python -m reconspace export-html .\audit.json .\audit.html --redact
 ```
 
+Run AI Audit Advisor to get intelligent recommendations from an audit report:
+```powershell
+# Using OpenAI, Anthropic, Gemini, or local Ollama:
+python -m reconspace ai-review .\audit.json --provider openai --model gpt-4o-mini
+# Or with local Ollama (100% private, zero external network):
+python -m reconspace ai-review .\audit.json --provider ollama --model llama3.2 --out ai_advice.md
+```
+
 ### Option 3: Standalone Portable Application
 Run the single-file zero-dependency package directly:
 ```powershell
-python Releases\ReconSpace-v1.0.pyz
+python Releases\ReconSpace-v1.3.pyz
 ```
 
 ---
@@ -103,6 +119,7 @@ python Releases\ReconSpace-v1.0.pyz
 ├── App/                       # Portable, ready-to-run application distribution
 ├── Source/                    # Full development source tree
 │   ├── reconspace/            # Core Python modules & collectors
+│   │   ├── ai_advisor.py      # AI review engine (OpenAI, Anthropic, Gemini, Ollama)
 │   │   ├── classify.py        # Finding classification & priority scoring
 │   │   ├── engine.py          # Scan orchestrator & phase pipeline
 │   │   ├── ntfs.py            # Win32 NTFS & MFT metadata collection
@@ -112,7 +129,7 @@ python Releases\ReconSpace-v1.0.pyz
 │   │   ├── runner.py          # Cryptographic plan verification & safe execution
 │   │   ├── webapp.py          # Local dashboard server & telemetry UI
 │   │   └── windows_collectors.py # Win32/CIM/Registry collectors
-│   ├── tests/                 # Complete automated test suite (140 tests)
+│   ├── tests/                 # Complete automated test suite (158 tests)
 │   ├── schemas/               # JSON Schema specifications for reports & rule packs
 │   ├── examples/              # Custom rule pack and query syntax examples
 │   ├── build_portable_pyz.py  # Portable single-file package builder
@@ -137,7 +154,7 @@ cd Source
 python -m pytest tests
 ```
 
-**Current Suite Status:** `140 passed in ~15s` (0 failures, 0 warnings).
+**Current Suite Status:** `158 passed in ~25s` (0 failures, 0 warnings).
 
 To verify the cryptographic integrity of the release manifest:
 ```powershell

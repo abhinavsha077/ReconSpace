@@ -1,0 +1,14 @@
+{
+  "version": "1.2.0",
+  "date": "2026-10-05",
+  "palette": "graphite, icy blue, mint",
+  "unit_api_tests_passed": 163,
+  "browser_cases_passed": 19,
+  "sidebar_routes_checked": 9,
+  "default_busy_port_fallback": "PASS",
+  "result_tabs_checked": 31,
+  "open_blocking_ui_defects": 0,
+  "unexpected_javascript_errors": 0,
+  "expected_validation_http_status": 400,
+  "limitations": ["No native FPS parity benchmark", "No destructive cleanup", "No cloud AI call", "No full C-drive audit", "Collector-bound cancellation latency"]
+}

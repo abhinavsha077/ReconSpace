@@ -9,13 +9,13 @@ class ObservatoryUiTests(unittest.TestCase):
         cls.html = _html()
 
     def test_observatory_visual_system_and_result_rail_are_present(self):
-        self.assertIn("ReconSpace Observatory — v0.5 visual system", self.html)
-        self.assertIn('content:"SYSTEM MAP"', self.html)
-        self.assertIn('content:"AUDIT MAP"', self.html)
-        self.assertIn("grid-template-columns:224px minmax(0,1fr)", self.html)
+        self.assertIn("ReconSpace Care 1.2", self.html)
+        self.assertIn('id="careResults"', self.html)
+        self.assertIn('src="/assets/care-desktop.png"', self.html)
+        self.assertIn("function renderCareResults()", self.html)
 
     def test_ui_has_mobile_and_reduced_motion_modes(self):
-        self.assertIn("@media(max-width:760px)", self.html)
+        self.assertIn("@media(max-width:560px)", self.html)
         self.assertIn("@media(prefers-reduced-motion:reduce)", self.html)
         self.assertIn("scroll-behavior:auto!important", self.html)
 
@@ -23,7 +23,8 @@ class ObservatoryUiTests(unittest.TestCase):
         self.assertIn("function initTabs()", self.html)
         self.assertIn("aria-controls','view", self.html)
         self.assertIn("aria-labelledby=\"audit-tab-overview\"", self.html)
-        self.assertIn("aria-orientation',matchMedia", self.html)
+        self.assertIn("aria-orientation','horizontal", self.html)
+        self.assertIn("tabs.filter(t=>!t.classList.contains('hidden'))", self.html)
         self.assertIn("event.key==='ArrowDown'", self.html)
         self.assertIn("event.key==='Home'", self.html)
 

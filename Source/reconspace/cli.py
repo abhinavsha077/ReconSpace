@@ -5,6 +5,13 @@ import json
 import sys
 from pathlib import Path
 
+from .ai_advisor import (
+    AIProviderConfig,
+    ai_review_to_json,
+    build_advisor_prompt,
+    query_ai_advisor,
+    render_ai_review_markdown,
+)
 from .compare import compare_reports, load_report
 from .doctor import doctor
 from .engine import AuditConfig, PROFILE_DEFAULTS, run_audit
@@ -165,6 +172,17 @@ def _main() -> None:
     exec_plan_p.add_argument("--items", default="", help="Comma-separated item IDs to execute (e.g. RS-0001,RS-0002)")
     exec_plan_p.add_argument("--output", help="Optional path to write JSON execution audit log")
 
+    ai_p = sub.add_parser("ai-review", help="Generate AI audit recommendations and review from an exported report")
+    ai_p.add_argument("report", help="Path to exported ReconSpace JSON report")
+    ai_p.add_argument("--provider", choices=("openai", "anthropic", "gemini", "ollama", "heuristic", "mock"), default="heuristic", help="AI provider (default: heuristic)")
+    ai_p.add_argument("--api-key", default="", help="API key for selected cloud provider (or set via OPENAI_API_KEY, ANTHROPIC_API_KEY, etc.)")
+    ai_p.add_argument("--model", default="", help="Model identifier override")
+    ai_p.add_argument("--endpoint", default="", help="Custom HTTP endpoint override (e.g. for Ollama or LocalAI)")
+    ai_p.add_argument("--no-redact", action="store_true", help="Opt out of automatic PII redaction (redaction is ON by default)")
+    ai_p.add_argument("--prompt-only", action="store_true", help="Print sanitized prompt without making external API calls")
+    ai_p.add_argument("--json", action="store_true", help="Output structured recommendations as JSON")
+    ai_p.add_argument("--output", help="Optional path to write output (Markdown or JSON)")
+
     args = parser.parse_args()
     if (
         args.command == "scan"
@@ -274,6 +292,37 @@ def _main() -> None:
             _write_requested(args.output, out_str)
         else:
             print(out_str)
+        return
+
+    if args.command == "ai-review":
+        rep = load_report(args.report)
+        if args.prompt_only:
+            system_prompt, user_prompt, summary = build_advisor_prompt(rep, redact=not args.no_redact)
+            combined = f"--- SYSTEM PROMPT ---\n{system_prompt}\n\n--- USER PROMPT ---\n{user_prompt}\n"
+            if args.output:
+                _write_requested(args.output, combined)
+            else:
+                print(combined)
+            return
+
+        cfg = AIProviderConfig(
+            provider=args.provider,
+            api_key=args.api_key,
+            model=args.model,
+            endpoint=args.endpoint,
+        )
+        res = query_ai_advisor(rep, config=cfg, redact=not args.no_redact)
+        if args.json:
+            out_text = json.dumps(ai_review_to_json(res), indent=2, ensure_ascii=False)
+        else:
+            out_text = render_ai_review_markdown(res)
+
+        if args.output:
+            _write_requested(args.output, out_text)
+        else:
+            print(out_text)
+        if not res.ok:
+            raise SystemExit(1)
         return
 
     report = run_audit(

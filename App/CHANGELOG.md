@@ -1,5 +1,46 @@
 # Changelog
 
+## 1.3.0 — 2026-10-05
+
+- Researched MacPaw's Smart Care, 3D/parallax design, Space Lens interaction and accessibility guidance; saved a complete experience plan.
+- Added five original transparent glass illustrations, graphic-led module welcomes and results, real-phase scan artwork, pointer parallax, directional zoom/fade stages and a sliding sidebar marker.
+- Added an accessible linked storage bubble map with retained-evidence drill-down and breadcrumbs. No fabricated filesystem nodes or cleanup claims.
+- Added tab-scoped refresh session recovery, persistent motion preferences, hidden-tab animation pausing, and eliminated stacked legacy animation/reflow.
+- Preserved the graphite/icy-blue/mint palette and existing read-only audit engine, exports, tabs and AI Advisor.
+
+## 1.2.0 — 2026-10-05
+
+- Rebuilt the complete visual system around a focused welcome → audit → review experience: graphite surfaces, icy-blue/mint accents, original generated desktop artwork, and a coherent vector icon family. Purple was removed following user review.
+- Dedicated scanning spotlight and results overview, functioning module navigation, packaged local artwork, restrained zoom/fade transitions, zoom controls, and reduced-motion support.
+- Fixed hidden-tab keyboard navigation and report-import summary refresh; retained the existing audit engine, detailed module hubs, exports, and AI Advisor.
+- Shipped the same UI in App, portable PYZ, and complete ZIP. See CARE_UI_QA.md for verification and limitations.
+
+## 1.1.0 — 2026-10-03
+
+### Open-Source System Intelligence Deepening & AI Audit Advisor
+
+- **AI Audit Advisor (`reconspace.ai_advisor`)**:
+  - Multi-provider architecture supporting OpenAI, Anthropic Claude, Google Gemini, Ollama local models, and offline deterministic heuristic analysis with zero runtime external dependencies (Python 3.11+ stdlib only via `urllib.request`).
+  - Automatic report sanitization and PII redaction (`build_advisor_prompt`) transforming sensitive user paths, tokens, and system names into generic environment placeholders.
+  - High-signal context condensation (`build_condensed_audit_context`) synthesizing storage, memory load, Defender state, crash dumps, delivery cache, and system internals.
+  - Structured advisor schema outputting an overall System Wellness Score (0–100), Critical Actions, Quick Wins, Safety Warnings (guarding virtualenvs, WinSxS hardlinks, WSL VHDX files), and Architectural Explainers.
+  - Safe inspection commands and recipes for one-click operator review.
+- **Deepened Open-Source Windows Telemetry (`reconspace.windows_collectors`)**:
+  - `collect_hibernation_pagefile_intelligence`: Dism++ inspired analysis checking `hiberfil.sys` sizing and calculating ~50% RAM disk savings via Windows reduced hibernation mode (`powercfg /hibernate /type reduced`).
+  - `collect_delivery_optimization_status`: Windows Update peer-to-peer distribution cache sizing and upload bandwidth metrics (`Get-DeliveryOptimizationPerfSnap`).
+  - `collect_battery_power_health`: Mobile/desktop power diagnostics via CIM `Win32_Battery` reporting charge percentage, wear levels, and AC connected states.
+  - `collect_network_adapters_telemetry`: Glances/Stacer style network adapter inventory reporting active interfaces, link speeds, and interface types via `Get-NetAdapter`.
+  - `collect_crash_dumps_inventory`: Forensic memory and user crash dump sizing across `%SystemRoot%\MEMORY.DMP`, minidumps, and `%LocalAppData%\CrashDumps`.
+  - `collect_recycle_bin_metrics`: PrivaZer inspired volume-level Recycle Bin sizing via Win32 `SHQueryRecycleBinW` with robust directory walk fallback.
+- **Web UI & CLI Integration**:
+  - Added CLI `ai-review` subcommand supporting `--provider`, `--api-key`, `--model`, `--endpoint`, `--prompt-only`, `--json`, `--output`, and `--no-redact`.
+  - Integrated dedicated AI Advisor view into the Web UI with live provider configuration, prompt inspection, wellness score meter, recommendation filter pills, and Markdown/JSON export.
+  - Deepened Cleanup and Performance Hubs with cards and telemetry for the new open-source collectors.
+  - Added backend endpoints `POST /api/ai-review` and `GET /api/ai-prompt`.
+- **Safety & Quality**:
+  - Full adherence to read-only scanner invariant verified by `test_safety.py`.
+  - Expanded test suite to 158 tests passing at 100%.
+
 ## 1.0.0 — 2026-10-02
 
 ### Production Safe-Execution Runner & Milestone Release

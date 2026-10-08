@@ -154,7 +154,7 @@ class CleanMyMacForPCTests(unittest.TestCase):
             self.assertIn(f"function {func}", html)
 
         # Verify CleanMyMac CSS classes
-        for css in (".hub-hero", ".hub-orb", ".hub-card-grid", ".recipe-box", ".perm-badge", ".lens-tree", ".pillar-grid", ".cleanup-pillar", ".protection-pillar", ".performance-pillar", ".applications-pillar"):
+        for css in (".hub-hero", ".hub-orb", ".hub-card-grid", ".recipe-box", ".perm-badge", ".lens-tree", ".pillar-grid", ".pillar-card"):
             self.assertIn(css, html)
 
         # Verify Care Pillars in Overview

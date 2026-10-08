@@ -149,3 +149,17 @@ To build an unmatched desktop utility, we researched and synthesized techniques 
 - [x] Signed approval plan manifests with cryptographic SHA-256 checksums (`verify_plan_manifest`).
 - [x] Standalone audited action runner (`execute_approved_plan`) with strict boundary protections (`is_system_protected_path`), required `--confirm`, and Windows Recycle Bin reversibility (`SHFileOperationW`).
 
+### Phase 5: Open-Source Intelligence Deepening & AI Audit Advisor (v1.1.0) — **Completed**
+- [x] **Dism++ Hibernation & Sizing Intelligence**: Added `collect_hibernation_pagefile_intelligence` inspecting `hiberfil.sys`, `pagefile.sys`, and calculating 50% RAM space reclamation via Windows reduced hibernation mode (`powercfg /hibernate /type reduced`) without losing Fast Startup.
+- [x] **Delivery Optimization Telemetry**: Added `collect_delivery_optimization_status` auditing peer cache storage, peer upload bytes, and download policy modes.
+- [x] **Battery & Power Health**: Added `collect_battery_power_health` leveraging CIM `Win32_Battery` to report device wear levels, charge capacity, and AC power states.
+- [x] **Network Telemetry**: Added `collect_network_adapters_telemetry` inspired by Glances and Stacer to inventory active interfaces, speeds, and status via `Get-NetAdapter`.
+- [x] **Forensic Crash Dump Inventory**: Added `collect_crash_dumps_inventory` identifying kernel `MEMORY.DMP`, minidumps, and user crash dumps (`%LocalAppData%\CrashDumps`).
+- [x] **PrivaZer-Style Recycle Bin Sizing**: Added `collect_recycle_bin_metrics` using Win32 `SHQueryRecycleBinW` with folder fallback.
+- [x] **AI Audit Advisor Architecture (`reconspace.ai_advisor`)**:
+  - Zero-runtime-dependency multi-provider client (`urllib.request`) supporting OpenAI, Anthropic Claude, Google Gemini, Ollama local LLMs, and deterministic heuristic fallback.
+  - Automatic PII sanitization and redaction (`build_advisor_prompt`) preserving privacy by transforming user names, paths, and identifiers into generic environment placeholders.
+  - Condensed telemetry extractor (`build_condensed_audit_context`) synthesizing storage, memory, Defender, and Windows internals into a token-efficient JSON payload.
+  - Structured output schema generating System Wellness Score (0–100), Critical Actions, Quick Wins, Safety Warnings (guarding developer virtual environments, WinSxS hardlinks, WSL VHDX files), and Architectural Explainers.
+- [x] **Full CLI & Web UI Integration**: Added `reconspace ai-review` subcommand and interactive AI Advisor rail/tab in the Web UI with live provider switching, prompt inspection, wellness score gauge, recommendation filter pills, copyable recipes, and markdown/JSON export.
+

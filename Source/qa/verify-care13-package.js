@@ -1,0 +1,33 @@
+async page => {
+  await page.reload();
+  await page.waitForFunction(()=>!document.querySelector('#scan').disabled);
+  const nav=page.getByRole('navigation',{name:'Main navigation'});
+  await page.locator('#motionPreference').selectOption('reduced');
+  await nav.getByRole('button',{name:'Reports',exact:true}).click();
+  await page.getByLabel('Import report JSON',{exact:true}).setInputFiles('output/playwright/care-13-export.json');
+  await nav.getByRole('button',{name:'Smart Audit',exact:true}).click();
+  await page.locator('.result-card').first().waitFor({state:'visible'});
+  const importedCards=await page.locator('.result-card').count();
+  const art=[];
+  for(const name of ['storage','protection','performance','applications','clutter'])art.push({name,status:(await page.request.get(new URL('/assets/care-'+name+'.png',page.url()).href)).status()});
+  await page.screenshot({path:'output/playwright/care-13-packaged-results.png'});
+  await nav.getByRole('button',{name:'My Clutter',exact:true}).click();
+  await page.locator('.lens-heading').waitFor({state:'visible'});
+  await page.screenshot({path:'output/playwright/care-13-space-lens.png'});
+  await page.locator('#lensExplore').click();
+  const drill=await page.locator('.lens-crumbs button').count();
+  if(drill>1)await page.locator('.lens-crumbs button').first().click();
+  await page.getByRole('button',{name:'Scan settings',exact:true}).first().click();
+  await page.locator('#root').fill('T:/ArcX/Archive Win - PC Cleaner/Source/examples');
+  await page.locator('#profile').selectOption('deep');
+  await page.locator('#noProcesses').check();
+  await page.locator('#autoAiReview').uncheck();
+  await page.locator('#scan').click();
+  await page.locator('#liveMonitor').waitFor({state:'visible'});
+  await page.waitForFunction(()=>!document.querySelector('#cancelSpotlight').disabled);
+  await page.screenshot({path:'output/playwright/care-13-scan.png'});
+  await page.locator('#cancelSpotlight').click();
+  await page.waitForFunction(()=>document.querySelector('#liveMonitor').classList.contains('hidden'),null,{timeout:90000});
+  const cancelled=await page.evaluate(()=>document.querySelector('#status').textContent);
+  return {importedCards,art,drill,cancelled,version:await page.locator('.version-badge').textContent()};
+}

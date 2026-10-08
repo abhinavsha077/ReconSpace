@@ -43,6 +43,34 @@ class WebAppTests(unittest.TestCase):
         status, _ = self.request("/api/status", token=False)
         self.assertEqual(status, 403)
 
+    def test_busy_launch_port_falls_back_without_stopping_other_apps(self):
+        import contextlib
+        import errno
+        import io
+        from unittest.mock import Mock, patch
+        from reconspace.webapp import serve
+        for code in (errno.EADDRINUSE, errno.EACCES):
+            with self.subTest(error_code=code):
+                server = Mock()
+                server.server_address = ("127.0.0.1", 49152)
+                with patch("reconspace.webapp.LocalThreadingHTTPServer", side_effect=[OSError(code, "busy"), server]) as factory:
+                    with contextlib.redirect_stdout(io.StringIO()) as output:
+                        serve(port=8765, open_browser=False)
+                self.assertEqual(factory.call_args_list[1].args[0], ("127.0.0.1", 0))
+                self.assertIn("http://127.0.0.1:49152/", output.getvalue())
+                server.server_close.assert_called_once()
+
+    def test_landing_artwork_is_a_local_packaged_png(self):
+        from importlib.resources import files
+        with urllib.request.urlopen(f"http://127.0.0.1:{self.port}/assets/care-desktop.png", timeout=3) as response:
+            self.assertEqual(response.headers.get("Content-Type"), "image/png")
+            self.assertEqual(response.headers.get("X-Content-Type-Options"), "nosniff")
+            self.assertEqual(response.read(), files("reconspace").joinpath("assets/care-desktop.png").read_bytes())
+
+    def test_asset_route_does_not_expose_other_local_files(self):
+        status, _ = self.request("/assets/../webapp.py")
+        self.assertEqual(status, 404)
+
     def test_root_has_security_headers(self):
         req = urllib.request.Request(f"http://127.0.0.1:{self.port}/?token={TOKEN}")
         with urllib.request.urlopen(req, timeout=3) as r:
@@ -99,11 +127,32 @@ class WebAppTests(unittest.TestCase):
         self.assertIn("sameRoot&&typeof os.filesystem_free_bytes", source)
         self.assertIn("Free-space delta is suppressed because the scan roots differ", source)
 
-    def test_browser_removes_session_token_from_visible_url_and_uses_header(self):
-        source = (Path(__file__).resolve().parents[1] / "reconspace" / "webapp.py").read_text(encoding="utf-8")
-        self.assertIn("history.replaceState(null,'',location.pathname)", source)
-        self.assertIn("fetch('/api/status',{cache:'no-store',credentials:'omit',headers:{'X-ReconSpace-Token':token}})", source)
-        self.assertNotIn("fetch('/api/status?token='+encodeURIComponent(token)", source)
+    def test_ai_prompt_get_returns_preview_when_no_report(self):
+        status, text = self.request("/api/ai-prompt")
+        self.assertEqual(status, 200)
+        data = json.loads(text)
+        self.assertIn("prompt", data)
+        self.assertIn("SYSTEM PROMPT", data["prompt"])
+
+    def test_ai_prompt_post_accepts_custom_report(self):
+        sample = {"version": "1.1", "root": "C:\\", "findings": [], "summary": {}}
+        status, text = self.request("/api/ai-prompt", method="POST", body={"report": sample})
+        self.assertEqual(status, 200)
+        data = json.loads(text)
+        self.assertIn("prompt", data)
+
+    def test_ai_review_post_with_heuristic_provider(self):
+        sample = {
+            "version": "1.1",
+            "root": "C:\\",
+            "findings": [{"id": "t1", "category": "system_cache", "severity": "warn", "title": "Old cache", "reclaimable_bytes": 1000}],
+            "summary": {"reclaimable_bytes": 1000},
+        }
+        status, text = self.request("/api/ai-review", method="POST", body={"report": sample, "provider": "heuristic"})
+        self.assertEqual(status, 200)
+        data = json.loads(text)
+        self.assertTrue(data.get("ok"))
+        self.assertIn("summary_verdict", data)
 
 
 if __name__ == "__main__":

@@ -1,0 +1,8 @@
+title,severity,area,status
+Refresh loses local session,P1,session,resolved
+Large snapshots cause navigation frame spikes,P2,motion,resolved
+Stale callback overrides newer menu choice,P2,navigation,resolved
+Dark storage labels on glass,P2,contrast,resolved
+Duplicate module headings,P3,layout,resolved
+Stacked legacy and tab animations,P2,motion,resolved
+Very large existing tables lack virtualization,P3,performance,tracked limitation

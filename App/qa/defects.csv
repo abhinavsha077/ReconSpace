@@ -1,0 +1,11 @@
+title,severity,area,status
+Hidden tabs reachable through arrow navigation,medium,keyboard,resolved
+Imported report missing landing summary,high,report import,resolved
+Scan status poll could override pending submission,high,scan lifecycle,resolved
+Stop action available before backend accepted scan,medium,cancellation,resolved
+Skipped View Transition generated rejected ready promise,medium,motion,resolved
+Cross-module links could select hidden tabs,medium,navigation,resolved
+Root shortcuts lacked keyboard activation,medium,accessibility,resolved
+Portable build missing new assets,high,packaging,resolved
+Purple palette rejected by user,high,visual design,resolved
+Default port collision prevented launch,high,startup,resolved

@@ -1,17 +1,37 @@
-# ReconSpace 1.0.0
+# ReconSpace 1.3.0
 
 ReconSpace is a **local, read-only Windows storage, software, persistence, ownership, and developer-tooling reconnaissance suite**. It is designed for machines where a conventional “junk cleaner” is too blunt—especially development, cybersecurity, virtualization, Docker, WSL, Android, game-development, forensic, and lab workstations.
 
-**Version:** 1.0.0  
+**Version:** 1.3.0
 **Report schema:** 4  
 **Runtime dependencies:** Python 3.11+ only for source/`.pyz` usage  
-**Default network behavior:** none; the optional dashboard binds to `127.0.0.1` only
+**Default network behavior:** none; the optional dashboard binds to `127.0.0.1` only. The AI Audit Advisor can query LLM endpoints if explicitly requested with your own API key, and automatically redacts PII before transmission.
 
-ReconSpace observes, measures, attributes, correlates, ranks, queries, compares, and exports evidence. It has **no cleanup executor** and no endpoint or command that deletes files, uninstalls applications, prunes Docker, unregisters WSL, changes the Registry, modifies services/tasks/ACLs, disables hibernation, removes restore points, compresses files, or changes Windows servicing state.
+ReconSpace observes, measures, attributes, correlates, ranks, queries, compares, and exports evidence. It has **no cleanup executor** in its core scanning engine and no endpoint or command that deletes files, uninstalls applications, prunes Docker, unregisters WSL, changes the Registry, modifies services/tasks/ACLs, disables hibernation, removes restore points, compresses files, or changes Windows servicing state.
 
-## What is new in 1.0.0
+## What is new in 1.3.0
 
-Version 1.0.0 introduces cryptographic plan verification and a strict, reversible safe-execution runner:
+Care 1.3 extends this experience with five original glass illustrations, coordinated pointer parallax, a sliding navigation marker, real-phase scan graphics, art-led review tiles, linked storage bubbles with retained-evidence drill-down, persistent reduced-motion preferences, and page-refresh session recovery. See [CARE_EXPERIENCE_PLAN.md](CARE_EXPERIENCE_PLAN.md) and [qa/care-13-report.md](qa/care-13-report.md).
+
+## What was new in 1.2.0
+
+A rebuilt Care interface: original desktop artwork, coordinated icons, welcome/scan/results stages, smooth zoom-and-fade navigation, adjustable UI zoom, and reduced-motion support. The top-level launcher and portable release both serve this UI. See [CARE_UI_QA.md](CARE_UI_QA.md) for verification.
+
+## What was added in 1.1.0
+
+Version 1.1.0 introduces the **AI Audit Advisor** and deepens open-source Windows reconnaissance collectors:
+- **AI Audit Advisor**: Multi-provider analysis (OpenAI, Anthropic Claude, Google Gemini, Ollama local models, and offline deterministic heuristics) that synthesizes audit telemetry into an executive brief, System Wellness Score (0–100), Critical Actions, Quick Wins, Safety Warnings (guarding developer virtual environments, WinSxS hardlinks, and WSL VHDX files), and Architectural Explainers.
+- **Automatic PII Redaction**: Telemetry sent to AI providers is strictly sanitized by default, replacing sensitive user names, profile paths, and environment tokens with generic placeholders.
+- **Dism++ Hibernation & Sizing Intelligence**: Checks `hiberfil.sys` and calculates ~50% RAM space reclamation via Windows reduced hibernation mode (`powercfg /hibernate /type reduced`) without disabling Fast Startup.
+- **Delivery Optimization & Network Telemetry**: Audits peer update cache bytes, upload bandwidth consumption, and active network adapters with link speeds.
+- **Battery & Power Health**: CIM `Win32_Battery` diagnostics reporting charge percentage, wear levels, design capacity, and AC power state.
+- **Forensic Crash Dump Inventory**: Audits `MEMORY.DMP`, minidumps, and `%LocalAppData%\CrashDumps` storage footprints.
+- **PrivaZer-Style Recycle Bin Sizing**: Queries volume-level Recycle Bin allocation via Win32 `SHQueryRecycleBinW`.
+- **Zero Runtime External Dependencies**: Built 100% on the Python standard library (`urllib.request`).
+
+## What was added in 1.0.0
+
+Version 1.0.0 introduced cryptographic plan verification and a strict, reversible safe-execution runner:
 - **Cryptographic Plan Manifests**: Every generated plan features a SHA-256 integrity hash to prevent disk drift or tampering before execution.
 - **Strict Safe-Execution Runner**: Actions are restricted strictly to items classified as `probably_safe_cleanup`. Automated execution rejects system boundaries (`System32`, `WinSxS`, system volume directories, user profile roots).
 - **Reversible Recycle Bin Execution**: Safe file cleanup delegates to Win32 `SHFileOperationW` with `FOF_ALLOWUNDO`, routing files to the Windows Recycle Bin rather than executing permanent deletions.
@@ -144,7 +164,7 @@ py -3 -m reconspace scan --root C:\ --profile deep --json .\reconspace-audit.jso
 Run the single-file package:
 
 ```powershell
-py -3 ReconSpace-v0.6.pyz
+py -3 ReconSpace-v1.2.pyz
 ```
 
 For better coverage, you may manually open an elevated Terminal and run the same command. ReconSpace never self-elevates and never changes permissions.
@@ -181,6 +201,26 @@ py -3 -m reconspace plan .\reconspace-audit.json
 ```
 
 Every item remains `PENDING_REVIEW`, and execution remains `NONE`.
+
+Run the AI Audit Advisor (offline deterministic heuristic by default):
+
+```powershell
+py -3 -m reconspace ai-review .\reconspace-audit.json
+```
+
+Run AI review with OpenAI, Anthropic, Gemini, or Ollama:
+
+```powershell
+py -3 -m reconspace ai-review .\reconspace-audit.json --provider openai --api-key sk-... --output review.md
+py -3 -m reconspace ai-review .\reconspace-audit.json --provider anthropic --api-key sk-ant-... --json
+py -3 -m reconspace ai-review .\reconspace-audit.json --provider ollama --model llama3:latest
+```
+
+Inspect the auto-sanitized / redacted prompt without making any network calls:
+
+```powershell
+py -3 -m reconspace ai-review .\reconspace-audit.json --prompt-only
+```
 
 Export complete tables:
 
@@ -326,7 +366,7 @@ The dependency-free single-file package can be rebuilt without downloading anyth
 build_portable_pyz.bat
 ```
 
-This recreates `ReconSpace-v0.6.pyz` from the current source tree while excluding bytecode caches. You can optionally pass a different output path.
+This recreates `ReconSpace-v1.2.pyz` from the current source tree, including local artwork and styles, while excluding bytecode caches. You can optionally pass a different output path.
 
 Release maintainers can rebuild the complete distribution only after the release manifest validates:
 

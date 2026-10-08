@@ -1,0 +1,32 @@
+async page => {
+  await page.reload();
+  await page.waitForFunction(()=>typeof REPORT!=='undefined'&&REPORT!==null);
+  const nav=page.getByRole('navigation',{name:'Main navigation'});
+  await nav.getByRole('button',{name:'My Clutter',exact:true}).click();
+  await page.locator('.lens-heading').waitFor({state:'visible'});
+  await page.evaluate(async()=>{if(pageTransition)await pageTransition.finished.catch(()=>{});});
+  await page.locator('#motionPreference').selectOption('reduced');
+  await page.screenshot({path:'output/playwright/care-13-space-lens.png'});
+  const contrast=await page.locator('.lens-list-item').first().evaluate(el=>getComputedStyle(el).color);
+  await page.getByRole('button',{name:'Zoom in',exact:true}).click();
+  const zoom=await page.locator('#zoomReadout').textContent();
+  await page.getByRole('button',{name:'Reset zoom',exact:true}).click();
+  const downloadPromise=page.waitForEvent('download');
+  await page.getByRole('button',{name:'Export report JSON',exact:true}).click();
+  const download=await downloadPromise;
+  await download.saveAs('output/playwright/care-13-export.json');
+  await page.locator('#motionPreference').selectOption('system');
+  await page.emulateMedia({reducedMotion:'reduce'});
+  await page.waitForFunction(()=>document.body.dataset.motion==='reduced');
+  const osReduced=await page.evaluate(()=>({mode:document.body.dataset.motion,animations:document.getAnimations().filter(a=>a.playState==='running').length}));
+  await page.emulateMedia({reducedMotion:'no-preference'});
+  await page.waitForFunction(()=>document.body.dataset.motion==='full');
+  await page.getByRole('button',{name:'Scan settings',exact:true}).first().click();
+  await page.locator('#root').fill('T:/this-reconspace-folder-does-not-exist');
+  await page.locator('#scan').click();
+  await page.waitForFunction(()=>document.querySelector('[role=alert]')?.textContent.includes('exist'));
+  const validation=await page.locator('[role=alert]').textContent();
+  await page.screenshot({path:'output/playwright/care-13-invalid-root.png'});
+  await page.locator('#root').fill('T:/ArcX/Archive Win - PC Cleaner/Source');
+  return {contrast,zoom,download:download.suggestedFilename(),osReduced,validation};
+}
