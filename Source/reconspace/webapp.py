@@ -277,6 +277,9 @@ def _html() -> str:
 </div>
 
 <div id="moduleIntro" class="hidden"></div>
+<nav id="flowNavigation" class="flow-navigation hidden" aria-label="Review navigation"></nav>
+<div id="flowContent" class="hidden"></div>
+<dialog id="flowDialog" aria-label="Review and scan confirmation"></dialog>
 <div class="panel" id="scanComposer">
   <div class="smart-stage">
     <div class="smart-copy">
@@ -554,6 +557,7 @@ def _html() -> str:
 const PROFILE_DEFAULTS=__PROFILES__;
 __CARE_MOTION__
 __SPACE_LENS__
+__CARE_FLOW__
 const token=(()=>{const supplied=new URLSearchParams(location.search).get('token')||'';try{if(supplied)sessionStorage.setItem('rs_session',supplied);return supplied||sessionStorage.getItem('rs_session')||'';}catch{return supplied;}})();
 if(token)history.replaceState(null,'',location.pathname+location.hash);
 let REPORT=null,currentView='overview',previousReport=null,pollFailures=0;
@@ -830,14 +834,14 @@ function navigatePage(name,updateHistory=true){
 }
 function moduleWelcome(name){
   const p=PAGES[name];
-  return `<section class="module-welcome"><div class="module-art" data-parallax><div class="parallax-object">${careArtwork(name)}</div></div><div class="module-welcome-copy"><span class="smart-eyebrow">Your PC, understood</span><h2>${esc(p.title)}</h2><p>${esc(p.description)}</p><p class="small">Start a read-only audit to discover real evidence. Nothing is removed or changed.</p><button onclick="navigatePage('home')">Go to Smart Audit</button>${name==='reports'?'<label class="import-button">Import report JSON<input aria-label="Import report JSON" type="file" accept=".json,application/json" onchange="handleReportImport(event)"></label>':''}</div></section>`;
+  return `<section class="module-welcome"><div class="module-art" data-parallax><div class="parallax-object">${careArtwork(name)}</div></div><div class="module-welcome-copy"><span class="smart-eyebrow">Your PC, understood</span><h2>${esc(p.title)}</h2><p>${esc(p.description)}</p><p class="small">Start a read-only audit to discover real evidence. Nothing is removed or changed.</p>${['cleanup','protection','performance','applications','clutter'].includes(name)?`<button onclick="CareFlow.setup(\'${name}\')">Scan & review →</button>`:'<button onclick="navigatePage(\'home\')">Go to Smart Audit</button>'}${name==='reports'?'<label class="import-button">Import report JSON<input aria-label="Import report JSON" type="file" accept=".json,application/json" onchange="handleReportImport(event)"></label>':''}</div></section>`;
 }
 function renderCareResults(){
   if(!REPORT)return;
   const rs=REPORT.reclaim_summary||{}, h=REPORT.audit_health||{};
   const collectedCount=(rows,suffix)=>rows.length?rows.length+' '+suffix:'No records';
   const cards=[['cleanup','clean','Storage',bytes(rs.path_candidates_nonoverlap_bytes||0),'Path candidates · review required'],['protection','protection','Protection',collectedCount(REPORT.binary_trust||[],'records'),'Signature inventory · check audit coverage'],['performance','performance','Performance',collectedCount(REPORT.processes||[],'processes'),'Process inventory · may be limited by profile'],['applications','applications','Applications',(REPORT.applications||[]).length+' apps','Installed application inventory'],['clutter','clutter','My Clutter',(REPORT.duplicates||[]).length+' groups','Duplicate potential · separate estimate']];
-  $('#careResults').innerHTML=`<div class="results-heading"><span class="smart-eyebrow">Your audit is ready</span><h2>A clearer picture of your PC.</h2><p>Explore your findings. You decide what happens next.</p></div><div class="results-grid">${cards.map(([page,icon,title,value,note])=>`<button class="result-card" data-parallax onclick="navigatePage('${page}')"><span class="result-art">${careArtwork(page)}</span><span class="result-title">${title}</span><b>${esc(value)}</b><small>${note}</small><span class="result-review">Review →</span></button>`).join('')}</div><div class="evidence-footer"><span>Evidence coverage: ${h.coverage_score===undefined?'not recorded':esc(h.coverage_score)+'/100'} · evidence quality, not PC health</span><button class="secondary" onclick="navigatePage('reports')">View audit evidence →</button></div><div class="results-footer"><span class="small">Read-only audit · no changes made</span><button onclick="navigatePage('settings')">Start another audit</button></div>`;
+  $('#careResults').innerHTML=`<div class="results-heading"><span class="smart-eyebrow">Your audit is ready</span><h2>A clearer picture of your PC.</h2><p>Explore your findings. You decide what happens next.</p></div><div class="results-grid">${cards.map(([page,icon,title,value,note])=>`<button class="result-card" data-parallax onclick="CareFlow.openModule('${page}',true)"><span class="result-art">${careArtwork(page)}</span><span class="result-title">${title}</span><b>${esc(value)}</b><small>${note}</small><span class="result-review">Review →</span></button>`).join('')}</div><div class="evidence-footer"><span>Evidence coverage: ${h.coverage_score===undefined?'not recorded':esc(h.coverage_score)+'/100'} · evidence quality, not PC health</span><button class="secondary" onclick="navigatePage('reports')">View audit evidence →</button></div><div class="results-footer"><span class="small">Read-only audit · no changes made</span><button onclick="CareFlow.setup('home')">Start another audit</button></div>`;
 }
 function applyPage(name,updateHistory=true){
   if(!PAGES[name])name='home';
@@ -856,7 +860,8 @@ function applyPage(name,updateHistory=true){
   intro.innerHTML=`<section class="module-banner"><span class="module-symbol">${careArtwork(name)}</span><div><h2>${page.title}</h2><p>${page.description}</p></div><button type="button" class="secondary" onclick="navigatePage('settings')">Configure scan</button></section>${!REPORT?(name==='ai'?getPreScanHub(name):moduleWelcome(name)):''}`;
   $('#summary').classList.toggle('hidden',!REPORT||name==='settings'||name==='home');
   $$('.tab').forEach(el=>el.classList.toggle('hidden',!page.views.includes(el.dataset.view)));
-  if(REPORT&&page.views.length&&name!=='home')switchTab(page.views[0],false);
+  const guided=CareFlow.enterPage(name);
+  if(REPORT&&page.views.length&&name!=='home'&&!guided)switchTab(page.views[0],false);
   if(name==='settings')$('.advanced').open=true;
   else if(name==='home')$('.advanced').open=false;
   if(updateHistory&&location.hash!=='#'+name)history.pushState(null,'','#'+name);
@@ -1066,6 +1071,7 @@ function switchTab(viewName,animateView=true) {
   });
   if(activeTab)$('#view').setAttribute('aria-labelledby',activeTab.id);
   currentView = viewName;
+  CareFlow.raw();
   render();
   if(animateView)CareMotion.animate($('#view'),[{opacity:.45,transform:'translateY(5px)'},{opacity:1,transform:'none'}],{duration:240,easing:'ease-out'});
 }
@@ -3035,6 +3041,8 @@ async function poll(){
 
     if(s.error)showError(s.error);
 
+    if(phase==='cancelled'&&!REPORT&&!running)CareFlow.cancelled();
+    if(phase==='failed'&&!REPORT&&!running)CareFlow.failed();
     if(s.has_report&&!REPORT&&!running){
       let reportResponse=await fetch('/api/report',{cache:'no-store',credentials:'omit',headers:{'X-ReconSpace-Token':token}});
       if(!reportResponse.ok)throw new Error(`Report request failed (${reportResponse.status}).`);
@@ -3042,7 +3050,7 @@ async function poll(){
       $('#scanComposer').classList.remove('scanning-active');
       renderCareResults();
       renderMetrics();
-      navigatePage(currentPage,false);
+      navigatePage(CareFlow.scanFinished(currentPage));
       if($('#autoAiReview') && $('#autoAiReview').checked){
         runAIReview();
       }
@@ -3062,6 +3070,7 @@ async function poll(){
 }
 
 $('#scan').onclick=async()=>{
+  CareFlow.scanStarted();
   if(scanRunning)return;
   let root=$('#root').value.trim().replace(/^["']|["']$/g,'').trim();
   if(!root){
@@ -3117,7 +3126,8 @@ $('#scan').onclick=async()=>{
     scanStartTime=null;
     scanRunning=false;
     $('#scanComposer').classList.remove('scanning-active');
-    navigatePage('settings');
+    const failedDestination=CareFlow.scanFailed();
+    navigatePage(REPORT?failedDestination:'settings');
   }
 };
 
@@ -3282,7 +3292,7 @@ profileHint();
 poll();
 </script>
 </body>
-</html>'''.replace("__PROFILES__", profiles).replace("__VERSION__", __version__).replace("__CARE_CSS__", "\n".join(files("reconspace").joinpath("assets", name).read_text(encoding="utf-8") for name in ("care.css", "experience.css"))).replace("__CARE_MOTION__", files("reconspace").joinpath("assets/care-motion.js").read_text(encoding="utf-8")).replace("__SPACE_LENS__", files("reconspace").joinpath("assets/space-lens.js").read_text(encoding="utf-8"))
+</html>'''.replace("__PROFILES__", profiles).replace("__VERSION__", __version__).replace("__CARE_CSS__", "\n".join(files("reconspace").joinpath("assets", name).read_text(encoding="utf-8") for name in ("care.css", "experience.css", "care-flow.css"))).replace("__CARE_MOTION__", files("reconspace").joinpath("assets/care-motion.js").read_text(encoding="utf-8")).replace("__SPACE_LENS__", files("reconspace").joinpath("assets/space-lens.js").read_text(encoding="utf-8")).replace("__CARE_FLOW__", files("reconspace").joinpath("assets/care-flow.js").read_text(encoding="utf-8"))
 
 
 class Handler(BaseHTTPRequestHandler):

@@ -1,14 +1,14 @@
 {
   "product": "ReconSpace",
-  "version": "1.3.0",
+  "version": "1.4.0",
   "report_schema_version": 4,
-  "release_date": "2026-10-05",
-  "ui_build": "2026-10-05-v1.3.0-glass-motion",
+  "release_date": "2026-10-08",
+  "ui_build": "2026-10-08-v1.4.0-guided-care",
   "safety_model": "READ_ONLY_RECONNAISSANCE_SAFE_RECYCLE_EXECUTOR",
   "minimum_python": "3.11",
   "runtime_dependencies": [],
   "automated_tests": {
-    "unittest": 165,
+    "unittest": 167,
     "pytest": null,
     "branch_coverage_percent_build_host": 68
   },

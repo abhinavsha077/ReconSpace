@@ -3,13 +3,13 @@
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
 [![Platform](https://img.shields.io/badge/platform-Windows%2010%20%7C%2011-lightgrey.svg)](https://www.microsoft.com/windows)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-165%20passed-brightgreen.svg)](Source/qa/care-13-report.md)
+[![Tests](https://img.shields.io/badge/tests-167%20passed-brightgreen.svg)](Source/qa/care-14-report.md)
 [![Privacy](https://img.shields.io/badge/telemetry-0%25%20(local%20only)-blueviolet.svg)](SECURITY.md)
 [![Safety Model](https://img.shields.io/badge/safety-read--only%20core%20%2B%20reversible%20recycle%20bin-success.svg)](Source/SAFETY.md)
 
 **ReconSpace** is an advanced, transparent, and principled **Windows storage observatory, system audit, persistence, and developer-tooling reconnaissance suite**. It is designed for engineers, cybersecurity specialists, developers, and power users who need deep visibility into their machines without the risks of black-box "PC cleaners" or destructive registry wipers.
 
-Current runnable build: **1.3.0 Glass & Motion UI** — graphite, icy blue and mint; original 3D module artwork; graphic-led welcome/scan/results; linked storage bubbles; coordinated parallax and zoom/fade transitions; refresh-safe sessions and reduced-motion preferences. Run `run_reconspace.bat` from this directory. Close older app/server sessions first. Latest portable builds are in `Releases`; historical builds are recoverably archived under `Archives`. Design plan: [CARE_EXPERIENCE_PLAN.md](Source/CARE_EXPERIENCE_PLAN.md).
+Current runnable build: **1.4.0 Guided Care** — graphite, icy blue and mint; original 3D artwork and coordinated motion; focused module summaries, grouped item review, an evidence inspector, selection confirmation and a downloadable plan receipt. Technical tools remain under Advanced evidence. Cancelled scans preserve earlier review work. Run `run_reconspace.bat` from this directory. Close older app/server sessions first. Latest portable builds are in `Releases`; historical builds are recoverably archived under `Archives`. Researched interaction plan: [CARE_FLOW_PLAN.md](Source/CARE_FLOW_PLAN.md). This guided workflow exports review plans, not destructive actions.
 
 ReconSpace synthesizes the guided ergonomics of modern system care tools with strict, forensic-grade engineering: **read-only observation by default, zero telemetry, non-overlapping reclaim math, deep developer context, and cryptographic execution safety**.
 

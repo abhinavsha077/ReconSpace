@@ -1,0 +1,5 @@
+title,severity,area,status
+Search field lacked full-width styling,medium,review layout,resolved
+Scan return did not update URL hash,medium,navigation,resolved
+Previous report not restored after backend failure,high,scan recovery,resolved
+Session token omitted from diagnostic launch,low,test harness,resolved

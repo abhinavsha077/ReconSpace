@@ -1,7 +1,7 @@
 @echo off
 setlocal
 cd /d "%~dp0"
-echo Starting ReconSpace 1.3.0...
+echo Starting ReconSpace 1.4.0...
 where py >nul 2>nul
 if errorlevel 1 goto python_fallback
 py -3 -c "import sys; raise SystemExit(0 if sys.version_info >= (3, 11) else 1)" >nul 2>nul

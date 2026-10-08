@@ -1,0 +1,16 @@
+{
+  "version": "1.4.0",
+  "date": "2026-10-08",
+  "unit_api_tests_passed": 167,
+  "sidebar_routes_checked": 9,
+  "advanced_tabs_checked": 31,
+  "protected_selectable_rows": 0,
+  "page_sizes_for_67_fixture_items": [60, 7],
+  "cancel_preserved_selection": true,
+  "invalid_root_preserved_selection": true,
+  "main_flow_javascript_errors": 0,
+  "main_flow_http_failures": 0,
+  "expected_validation_status": 400,
+  "open_blocking_ui_defects": 0,
+  "limitations": ["Review-plan export only", "No native FPS parity benchmark", "No full C-drive scan", "No cloud AI call", "Tab-memory selection", "Collector-bound cancellation"]
+}

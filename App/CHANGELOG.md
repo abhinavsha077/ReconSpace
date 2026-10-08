@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.4.0 — 2026-10-08
+
+- Researched official Smart Care, Applications and My Clutter workflows; saved CARE_FLOW_PLAN.md before implementation.
+- Added focused module summaries, category review, bounded 60-row pagination, search, an evidence inspector and cross-category selection.
+- Added explicit scan-scope/depth confirmation, review-plan confirmation and a receipt with repeat download. Plans are local documents, not cleanup execution.
+- Home cards lead directly to grouped review; technical evidence remains accessible behind Advanced evidence.
+- Protected cleanup findings are inspect-only. Cancelled or failed scans restore earlier reports and selection; successful module scans return to that module with a matching URL.
+- Preserved original graphite/blue/mint artwork and motion, with responsive review layouts and reduced-motion support.
+
 ## 1.3.0 — 2026-10-05
 
 - Researched MacPaw's Smart Care, 3D/parallax design, Space Lens interaction and accessibility guidance; saved a complete experience plan.

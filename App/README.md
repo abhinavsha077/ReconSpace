@@ -1,15 +1,19 @@
-# ReconSpace 1.3.0
+# ReconSpace 1.4.0
 
 ReconSpace is a **local, read-only Windows storage, software, persistence, ownership, and developer-tooling reconnaissance suite**. It is designed for machines where a conventional “junk cleaner” is too blunt—especially development, cybersecurity, virtualization, Docker, WSL, Android, game-development, forensic, and lab workstations.
 
-**Version:** 1.3.0
+**Version:** 1.4.0
 **Report schema:** 4  
 **Runtime dependencies:** Python 3.11+ only for source/`.pyz` usage  
 **Default network behavior:** none; the optional dashboard binds to `127.0.0.1` only. The AI Audit Advisor can query LLM endpoints if explicitly requested with your own API key, and automatically redacts PII before transmission.
 
 ReconSpace observes, measures, attributes, correlates, ranks, queries, compares, and exports evidence. It has **no cleanup executor** in its core scanning engine and no endpoint or command that deletes files, uninstalls applications, prunes Docker, unregisters WSL, changes the Registry, modifies services/tasks/ACLs, disables hibernation, removes restore points, compresses files, or changes Windows servicing state.
 
-## What is new in 1.3.0
+## What is new in 1.4.0
+
+Guided Care adds module summaries → category-based item review → an evidence inspector → selected-item confirmation → a downloadable review-plan receipt. Protected cleanup evidence is inspect-only. Search, pagination, explicit back paths, scan-scope confirmation and cancellation recovery replace the technical-hub-first experience. Home review cards open the relevant manager directly; raw tabs remain under Advanced evidence. Selection stays in this browser tab, resets after a successful new audit, and never authorizes deletion. See [CARE_FLOW_PLAN.md](CARE_FLOW_PLAN.md) and [qa/care-14-report.md](qa/care-14-report.md).
+
+## What was new in 1.3.0
 
 Care 1.3 extends this experience with five original glass illustrations, coordinated pointer parallax, a sliding navigation marker, real-phase scan graphics, art-led review tiles, linked storage bubbles with retained-evidence drill-down, persistent reduced-motion preferences, and page-refresh session recovery. See [CARE_EXPERIENCE_PLAN.md](CARE_EXPERIENCE_PLAN.md) and [qa/care-13-report.md](qa/care-13-report.md).
 
